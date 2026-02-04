@@ -92,7 +92,7 @@ B站「稍后再看」视频 → 下载音频 → **Whisper 转文字** → **Qw
 | `clients/weread_browser.py` | 微信读书上传；`WEREAD_USE_CHROME` 控制是否用系统 Chrome。 |
 | `prompts/correct.txt` | 校正 prompt，占位符 `{text}`。 |
 | `prompts/summarize.txt` | 总结 prompt，`{title}` / `{author}` / `{text}`。 |
-| `E:\bilibili_summarizer_v3\output\` | 产出目录：media/、transcripts/、epub/；state 与 queue：`pipeline_state.json`、`pipeline_queue.json`；错误日志：`pipeline_error.log`。 |
+| `E:\Bilibili_AI_Summarizer\output\` | 产出目录：media/、transcripts/、epub/；state 与 queue：`pipeline_state.json`、`pipeline_queue.json`；错误日志：`pipeline_error.log`。 |
 
 ---
 
@@ -154,7 +154,7 @@ B站「稍后再看」视频 → 下载音频 → **Whisper 转文字** → **Qw
 
 ```powershell
 # 虚拟环境（若用 E 盘）
-E:\bilibili_summarizer_v3\venv\Scripts\activate
+E:\Bilibili_AI_Summarizer\venv\Scripts\activate
 
 # 状态
 python main.py status

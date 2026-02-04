@@ -1,4 +1,4 @@
-# Bilibili Summarizer 流程说明 (V3 Batch Edition)
+# Bilibili AI Summarizer 流程说明
 
 > 将 B站"稍后再看"视频自动转录为文字，用 Qwen3 校正+总结，生成 EPUB 电子书，上传微信读书。
 > **V3 特性**：采用批量处理管道（Batch Pipeline），支持 12GB 显卡的显存自动回收与断点续传。

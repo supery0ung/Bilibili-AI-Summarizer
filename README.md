@@ -1,4 +1,4 @@
-# Bilibili Summarizer V3 - Whisper 转录版
+# Bilibili AI Summarizer
 
 将 B站"稀后再看"视频自动转录为文字，生成 EPUB 电子书，上传微信读书。
 
@@ -16,7 +16,7 @@
 ### 1. 安装 Python 依赖
 
 ```bash
-cd bilibili_summarizer_v3
+cd Bilibili_AI_Summarizer
 pip install -r requirements.txt
 ```
 
@@ -111,7 +111,7 @@ python main.py status
 ## 文件结构
 
 ```
-bilibili_summarizer_v3/
+Bilibili_AI_Summarizer/
 ├── main.py              # CLI 入口
 ├── config.yaml          # 配置文件 (需自行创建)
 ├── filters.yaml         # 过滤规则
