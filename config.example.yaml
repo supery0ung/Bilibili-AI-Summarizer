@@ -1,0 +1,32 @@
+# Bilibili Summarizer V3 - Whisper 转录版配置示例
+# 复制此文件为 config.yaml 并填写你的配置
+
+# Bilibili 认证 (从浏览器 Cookie 获取)
+bilibili:
+  sessdata: "your_sessdata_here"
+  bili_jct: "your_bili_jct_here"
+  dedeuserid: "your_dedeuserid_here"
+  buvid3: "your_buvid3_here"
+
+# 视频下载配置
+download:
+  audio_only: true          # 仅下载音频 (节省空间，Whisper 只需要音频)
+  output_dir: "output/media"
+
+# Whisper 语音识别配置
+whisper:
+  model: "medium"           # 模型选择: tiny/base/small/medium/large/large-v3
+  device: "auto"            # 设备选择: auto/cpu/cuda/mps
+  language: "zh"            # 语言: zh (中文)
+
+# 流水线配置
+pipeline:
+  max_items_per_run: 20     # 每次运行最多处理的视频数
+  max_age_days: 30          # 超过此天数的视频将被跳过
+
+# 输出路径
+output:
+  state_file: "output/pipeline_state.json"
+  queue_file: "output/pipeline_queue.json"
+  transcripts_dir: "output/transcripts"
+  epub_dir: "output/epub"
