@@ -4,17 +4,25 @@ chcp 65001 >nul
 setlocal
 title Bilibili Summarizer V3 - Auto Run
 
-:: 自动获取当前脚本所在目录作为项目目录
-set PROJECT_DIR=%~dp0
-set PROJECT_DIR=%PROJECT_DIR:~0,-1%
+:: 自动建立日志目录
+if not exist "output\logs" mkdir output\logs
+echo [%date% %time%] --- Starting New Run --- >> output\logs\auto_run.log
 
-:: 默认虚拟环境路径（假设在项目目录下的 venv）
-set VENV_PATH=%PROJECT_DIR%\venv
+:: 设置项目路径
+set PROJECT_DIR=d:\Dropbox\Coding\Bilibili_Summarizer\bilibili_summarizer_v3
+set VENV_PATH=E:\bilibili_summarizer_v3\venv
 
 echo ============================================================
-echo      Bilibili Summarizer V3 - 一键批量处理 (MAX=10)
+echo      Bilibili Summarizer V3 - 一键批量处理
 echo ============================================================
 echo.
+
+:: 检查路径是否存在
+if not exist "%PROJECT_DIR%" (
+    echo [错误] 找不到项目目录: %PROJECT_DIR%
+    pause
+    exit /b 1
+)
 
 cd /d "%PROJECT_DIR%"
 
@@ -24,17 +32,20 @@ if exist "%VENV_PATH%\Scripts\activate.bat" (
     call "%VENV_PATH%\Scripts\activate.bat"
 ) else (
     echo [错误] 找不到虚拟环境: %VENV_PATH%
-    echo 请确保已运行 pip install -r requirements.txt
     pause
     exit /b 1
 )
 
-:: 运行流水线
-echo [2/2] 正在启动全自动流水线 (处理 10 个视频)...
+:: 运行流水线，同时输出到控制台和日志文件
+echo [2/2] 正在启动全自动流水线...
 echo ------------------------------------------------------------
-python main.py run --max-items 10
+python main.py run >> output\logs\auto_run.log 2>&1
 echo ------------------------------------------------------------
 
 echo.
+echo [%date% %time%] 任务执行完毕！ >> output\logs\auto_run.log
 echo 任务执行完毕！
-pause
+echo 已上传的书籍可以在微信读书中查看。
+echo.
+:: 定时任务不需要 pause，手动运行时如有需要可自行添加
+:: pause

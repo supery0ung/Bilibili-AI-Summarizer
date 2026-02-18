@@ -8,14 +8,3 @@ last_browser_prompt.md
 .gemini/
 .agent/
 brain/
-config.yaml
-*.log
-*.epub
-*.m4a
-*.mp3
-*.mp4
-*.md
-!README.md
-!PIPELINE_FLOW.md
-!AI_HANDOFF.md
-!prompts/*.txt

@@ -8,8 +8,11 @@ from __future__ import annotations
 import time
 import os
 import sys
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Reuse Playwright availability check logic
 try:
@@ -65,7 +68,7 @@ class WeReadBrowserClient:
         if self._page is not None:
             # If we need to force headful but current context is currently headless, we must restart
             if force_headful and self._current_headless:
-                print("  Restarting browser in headful mode for interaction...")
+                logger.info("  Restarting browser in headful mode for interaction...")
                 self.close()
             else:
                 return self._page
@@ -92,11 +95,11 @@ class WeReadBrowserClient:
             if channel:
                 print(f"Starting browser ({mode_str}) for WeChat Reading (using system Chrome)...")
             else:
-                print(f"Starting browser ({mode_str}) for WeChat Reading...")
+                logger.info(f"Starting browser ({mode_str}) for WeChat Reading...")
             self._context = self._playwright.chromium.launch_persistent_context(**launch_kw)
         except Exception as e:
             if channel:
-                print(f"Chrome failed ({e}), falling back to Chromium...")
+                logger.warning(f"Chrome failed ({e}), falling back to Chromium...")
                 launch_kw.pop("channel", None)
                 self._context = self._playwright.chromium.launch_persistent_context(**launch_kw)
             else:
@@ -119,53 +122,69 @@ class WeReadBrowserClient:
             bool: True if upload appears successful.
         """
         if not os.path.exists(file_path):
-            print(f"  ❌ File not found: {file_path}")
+            logger.error(f"  ❌ File not found: {file_path}")
             return False
             
         page = self._ensure_browser()
         
         # 1. Navigate to Shelf (bookshelf) - this usually triggers login if needed
-        print("  Navigating to WeRead Shelf...")
+        logger.debug("  Navigating to WeRead Shelf...")
         page.goto("https://weread.qq.com/web/shelf", wait_until="domcontentloaded")
         time.sleep(2)
         
         # 2. Check Login
-        # If not logged in, URL usually stays at /web/shelf but shows QR code
+        # If not logged in, URL usually stays at /web/shelf but shows QR code, or redirects to homepage
         try:
-            login_indicator = page.query_selector('.login_dialog_content, .login_container')
-            if login_indicator and login_indicator.is_visible():
+            # Check for various login indicators (dialogs, containers, or the login button on homepage)
+            login_indicator = page.query_selector('.login_dialog_content, .login_container, .navBar_login_button, :has-text("登录")')
+            
+            # Additional check: if redirected to index instead of shelf/upload
+            is_index = page.url == "https://weread.qq.com/" or page.url == "https://weread.qq.com/index.html"
+            
+            if (login_indicator and login_indicator.is_visible()) or is_index:
                 if self.headless:
-                    print("  ⚠ Login required but running in headless mode. Restarting in headful mode...")
+                    logger.info("  ⚠ Login required but running in headless mode. Restarting in headful mode...")
                     page = self._ensure_browser(force_headful=True)
-                    print("  Navigating back to shelf...")
+                    logger.info("  Navigating back to shelf for login...")
                     page.goto("https://weread.qq.com/web/shelf", wait_until="domcontentloaded")
-                    time.sleep(2)
+                    time.sleep(3)
                 
-                print("  ⚠ Please scan the QR code in the browser window to log in.")
-                print("  Waiting for login (up to 120 seconds)...")
+                print("\n" + "!" * 80)
+                print("  ⚠ PLEASE SCAN THE QR CODE IN THE BROWSER WINDOW TO LOG IN.")
+                print("  ⚠ 请在弹出的浏览器窗口中扫描二维码进行登录（已禁用超时，等待扫码中...）。")
+                print("!" * 80 + "\n")
+                logger.info("  Waiting for login (No timeout, waiting indefinitely)...")
                 
-                # Wait for login dialog to disappear or shelf content to appear
-                page.wait_for_selector('.shelf_list, .shelfItem', timeout=120000)
-                print("  ✓ Login detected.")
+                # Wait for login success: look for shelf or profile indicators
+                try:
+                    page.wait_for_selector('.shelf_list, .shelfItem, .navBar_avatar', timeout=0)
+                    logger.info("  ✓ Login detected.")
+                except:
+                    # If timeout, maybe it's still stuck
+                    current_url = page.url
+                    if "shelf" not in current_url and "upload" not in current_url:
+                        logger.error(f"  ❌ Login timed out or failed. Current URL: {current_url}")
+                        return False
                 time.sleep(2) 
         except Exception as e:
             # Maybe already logged in
+            logger.debug(f"  Login check skipped or handled: {e}")
             pass
             
         # Double check we are on shelf
         if "shelf" not in page.url:
-            print("  Redirecting to shelf...")
+            logger.debug("  Redirecting to shelf...")
             page.goto("https://weread.qq.com/web/shelf")
             time.sleep(2)
 
         # 3. Click "Import" / "Upload" button
         # Usually checking for a button with text "传书" or "导入"
         try:
-            print("  Looking for Upload button...")
+            logger.debug("  Looking for Upload button...")
             
             # Helper to check if we are already on the upload page
             if "/web/upload" in page.url:
-                print("  Already on upload page.")
+                logger.debug("  Already on upload page.")
             else:
                 # Try to find the button on the shelf first
                 btn_handle = page.evaluate_handle("""() => {
@@ -197,17 +216,17 @@ class WeReadBrowserClient:
                 
                 import_btn = btn_handle.as_element()
                 if import_btn:
-                    print(f"  ✓ Found Import button: {import_btn.inner_text().strip() or 'Icon'}")
+                    logger.debug(f"  ✓ Found Import button: {import_btn.inner_text().strip() or 'Icon'}")
                     import_btn.click()
                     time.sleep(2)
                 else:
-                    print("  ⚠ Could not find 'Import' button on shelf. Navigating directly to /web/upload...")
+                    logger.warning("  ⚠ Could not find 'Import' button on shelf. Navigating directly to /web/upload...")
                     page.goto("https://weread.qq.com/web/upload")
                     time.sleep(2)
 
             # 4. Handle File Selection on /web/upload page
             # This page usually has a "Select File" (选择文件) button or a drop zone.
-            print("  Waiting for 'Select File' button or drop zone...")
+            logger.debug("  Waiting for 'Select File' button or drop zone...")
             
             # Common selectors for the file input or the "Select File" button
             # WeRead's upload page often has a big button or a hidden input[type="file"]
@@ -235,24 +254,24 @@ class WeReadBrowserClient:
                     # Final debug screenshot
                     debug_path = Path("output/debug_weread_upload_page.png")
                     page.screenshot(path=str(debug_path))
-                    print(f"  ❌ Could not find file selection element on upload page. Screenshot: {debug_path}")
+                    logger.error(f"  ❌ Could not find file selection element on upload page. Screenshot: {debug_path}")
                     return False
 
                 # Handle file selection
                 if file_chooser_btn.evaluate("el => el.tagName") == "INPUT" and file_chooser_btn.get_attribute("type") == "file":
-                    print(f"  Setting files directly on input: {Path(file_path).name}...")
+                    logger.info(f"  Setting files directly on input: {Path(file_path).name}...")
                     file_chooser_btn.set_input_files(file_path)
-                    print("  ✓ set_input_files called on input.")
+                    logger.info("  ✓ set_input_files called on input.")
                 else:
-                    print(f"  Clicking selection button to trigger file chooser...")
+                    logger.info("  Clicking selection button to trigger file chooser...")
                     with page.expect_file_chooser(timeout=10000) as fc_info:
                         file_chooser_btn.click(force=True)
                     file_chooser = fc_info.value
-                    print(f"  Setting file via file_chooser: {Path(file_path).name}...")
+                    logger.debug(f"  Setting file via file_chooser: {Path(file_path).name}...")
                     file_chooser.set_files(file_path)
-                    print("  ✓ set_files called via file_chooser.")
+                    logger.debug("  ✓ set_files called via file_chooser.")
                 
-                print(f"  ✓ File selection logic finished.")
+                logger.debug(f"  ✓ File selection logic finished.")
                 
             except Exception as e:
                 print(f"  ❌ Error during file selection: {e}")
@@ -261,7 +280,7 @@ class WeReadBrowserClient:
                 return False
 
             # 5. Wait for upload completion with robust monitoring
-            print("  Uploading and waiting for processing (Robust Loop)...")
+            logger.info("  Uploading and waiting for processing (Robust Loop)...")
             
             start_time = time.time()
             max_wait = 120 # 2 minutes
@@ -301,7 +320,7 @@ class WeReadBrowserClient:
                 }""")
                 
                 if success_detected:
-                    print("  ✓ Successful upload message detected (excluding static text).")
+                    logger.debug("  ✓ Successful upload message detected (excluding static text).")
                     time.sleep(5)
                     return True
                 
@@ -314,7 +333,7 @@ class WeReadBrowserClient:
                 
                 if progress_text:
                     if progress_text != "0%": # Don't log 0% repeatedly
-                        print(f"  ... Upload Progress: {progress_text}")
+                        logger.info(f"  ... Upload Progress: {progress_text}")
                 else:
                     # If percentage is gone BUT we don't have success yet, 
                     # check if the progress bar/modal is still there
@@ -327,11 +346,11 @@ class WeReadBrowserClient:
                     
                     if not is_processing:
                         # If we were seeing progress and now it's gone, and no error visible
-                        print("  ✓ Progress indicators disappeared. Final check...")
+                        logger.debug("  ✓ Progress indicators disappeared. Final check...")
                         time.sleep(5)
                         return True
                     else:
-                        print("  ... Still processing...")
+                        logger.debug("  ... Still processing...")
                 
                 time.sleep(2)
             

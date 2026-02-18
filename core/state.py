@@ -105,16 +105,12 @@ class StateManager:
         self,
         videos: list[VideoInfo],
         max_items: int = 50,
-        max_age_days: int = 30,
     ) -> list[QueueItem]:
         """Build processing queue from video list.
         
         - Skip videos that already have status != 'new'
-        - Skip videos older than max_age_days
         - Cap at max_items
         """
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=max_age_days)
         queue: list[QueueItem] = []
         
         for video in videos:
@@ -135,18 +131,12 @@ class StateManager:
             if state.status == "skipped_old":
                 continue
             
-            # Check age
-            if state.first_seen:
-                try:
-                    first_seen_dt = parse_iso(state.first_seen)
-                    if first_seen_dt < cutoff:
-                        self.update(bvid, status="skipped_old")
-                        continue
-                except ValueError:
-                    pass
-            
-            # Only queue "new", "error", "downloading", "transcribing", or "success" (for re-upload)
-            if state.status not in ("new", "error", "downloading", "transcribing", "success"):
+            # Only queue statuses that need processing or re-processing
+            queueable = (
+                "new", "error", "downloading", "transcribing", "transcript_ready", 
+                "correcting", "corrected", "summarizing", "summarized", "success"
+            )
+            if state.status not in queueable:
                 continue
             
             queue.append(QueueItem.from_video_info(video))
@@ -163,3 +153,32 @@ class StateManager:
             status = data.get("status", "unknown")
             stats[status] = stats.get(status, 0) + 1
         return stats
+
+    def reset_non_uploaded_items(self) -> int:
+        """Reset all videos that are not in terminal states back to 'new'.
+        
+        Only counts items that actually changed state or had errors cleared.
+        
+        Returns:
+            The number of items reset.
+        """
+        count = 0
+        terminal_states = {"uploaded", "success", "skipped_old", "skipped_ai"}
+        
+        for bvid, data in self._state["videos"].items():
+            current_status = data.get("status", "new")
+            has_error = "error" in data
+            
+            if current_status not in terminal_states:
+                # If already 'new' and no error, skip counting and updating
+                if current_status == "new" and not has_error:
+                    continue
+                    
+                data["status"] = "new"
+                if has_error:
+                    del data["error"]
+                count += 1
+        
+        if count > 0:
+            self._save()
+        return count

@@ -1,143 +1,161 @@
-# Bilibili AI Summarizer
+# Bilibili Summarizer V3
 
-将 B站"稀后再看"视频自动转录为文字，生成 EPUB 电子书，上传微信读书。
+将 B站"稍后再看"视频自动转录为文字，AI 校正+总结，生成 EPUB 电子书，上传微信读书。
 
-## 功能
+## 功能流程
 
-1. **获取稀后再看列表** - 通过 Bilibili API
-2. **过滤视频** - 按时长、UP主、标题规则过滤
-3. **下载视频音频** - 使用 yt-dlp 下载
-4. **语音转文字** - 使用本地 Whisper 模型转录
-5. **生成 EPUB** - 转换为电子书格式
-6. **上传微信读书** - 自动上传 (可选)
+```
+获取列表 → 过滤 → 下载音频 → ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
+ Step A     A      Step B      Step C      Step D      Step E      Step F      Step G
+```
+
+| 步骤 | 功能 | 技术 |
+|------|------|------|
+| Step A | 获取稍后再看列表 + 规则过滤 + AI 过滤 | Bilibili API + Qwen3 |
+| Step B | 下载视频音频 | yt-dlp（并行下载） |
+| Step C | 语音转文字 | Qwen3-ASR / Whisper（本地） |
+| Step D | 校正转录文本（标点、分段、错别字） | Qwen3 8B（本地 Ollama） |
+| Step E | 生成内容摘要 | Qwen3 8B（本地 Ollama） |
+| Step F | 生成 EPUB 电子书 | 纯 Python |
+| Step G | 上传微信读书 | Playwright 浏览器自动化 |
+
+## 环境要求
+
+- Python 3.10+
+- NVIDIA GPU（12GB+ VRAM 推荐）
+- [Ollama](https://ollama.com/) + `qwen3:8b` 模型
+- ffmpeg
+- yt-dlp
 
 ## 安装
 
-### 1. 安装 Python 依赖
-
 ```bash
-cd Bilibili_AI_Summarizer
+cd bilibili_summarizer_v3
 pip install -r requirements.txt
-```
 
-### 2. 安装 ffmpeg (Whisper 需要)
-
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-**Windows:**
-```bash
-# 使用 chocolatey
-choco install ffmpeg
-# 或下载: https://ffmpeg.org/download.html
-```
-
-### 3. 安装 yt-dlp (视频下载)
-
-```bash
-pip install yt-dlp
-# 或
-brew install yt-dlp
+# 安装 ASR 和 LLM 模型
+ollama pull qwen3:8b
 ```
 
 ## 配置
 
-1. 复制配置示例:
-   ```bash
-   cp config.example.yaml config.yaml
-   ```
-
-2. 填写配置:
-   - Bilibili cookies (从浏览器获取)
-   - Whisper 模型选择
-   - 其他可选配置
-
-### Whisper 模型选择
-
-| 模型 | VRAM | 速度 | 质量 | 适用场景 |
-|------|------|------|------|----------|
-| `tiny` | ~1 GB | 最快 | 较低 | 测试 |
-| `base` | ~1 GB | 快 | 一般 | 简单内容 |
-| `small` | ~2 GB | 中 | 良好 | 日常使用 |
-| `medium` | ~5 GB | 慢 | 很好 | **推荐** |
-| `large-v3` | ~10 GB | 最慢 | 最佳 | 高端 GPU |
-
-在 `config.yaml` 中设置:
-```yaml
-whisper:
-  model: "medium"  # 推荐
-  device: "auto"   # 自动检测 GPU/CPU
+```bash
+cp config.example.yaml config.yaml
 ```
+
+编辑 `config.yaml`，填写：
+- Bilibili cookies（SESSDATA, bili_jct 等）
+- ASR 引擎选择（`qwen_asr` 或 `whisper`）
+- Ollama 模型配置
 
 ## 使用
 
-```bash
-# 运行完整流水线
-python main.py run
+```powershell
+# 一键运行全部流程 (A → G)
+python main.py run --max-items 10
 
-# 只获取 + 过滤视频列表
-python main.py fetch
+# 分步运行
+python main.py fetch                    # Step A: 获取 + 过滤
+python main.py download --max-items 5   # Step B: 下载音频
+python main.py transcribe --max-items 5 # Step C: 语音转文字
+python main.py correct --max-items 5    # Step D: 校正文本
+python main.py summarize --max-items 5  # Step E: 生成摘要
+python main.py epub                     # Step F: 生成 EPUB
+python main.py upload --max-items 5     # Step G: 上传微信读书
 
-# 只下载 + 转录 (最多处理 10 个)
-python main.py transcribe --max-items 10
-
-# 使用指定 Whisper 模型
-python main.py transcribe --whisper-model large-v3
-
-# 只生成 EPUB
-python main.py epub
-
-# 上传到微信读书
-python main.py upload
-
-# 查看当前状态
+# 查看状态
 python main.py status
+```
+
+## 输出文件
+
+| 步骤 | 文件 | 说明 |
+|------|------|------|
+| Step C | `{标题}.md` | ASR 原始转录 |
+| Step D | `{标题}.corrected.md` | 校正后文本 |
+| Step E | `{标题}.final.md` | 摘要 + 校正文本 |
+| Step F | `{标题}.epub` | 电子书 |
+
+## 项目结构
+
+```
+bilibili_summarizer_v3/
+├── main.py                     # CLI 入口
+├── config.yaml                 # 配置文件（需自行创建）
+├── config.example.yaml         # 配置示例
+├── filters.yaml                # 视频过滤规则
+├── requirements.txt            # Python 依赖
+├── PIPELINE_FLOW.md            # 流程详细说明
+├── TESTING.md                  # 测试文档
+│
+├── clients/                    # 外部服务客户端
+│   ├── bilibili.py             # Bilibili API
+│   ├── downloader.py           # yt-dlp 音频下载
+│   ├── ollama_client.py        # Qwen3 LLM（校正+总结）
+│   ├── qwen_asr_client.py      # Qwen3-ASR 语音识别
+│   └── weread_browser.py       # 微信读书上传
+│
+├── core/                       # 核心流水线逻辑
+│   ├── pipeline.py             # 流水线编排
+│   ├── state.py                # 状态管理（pipeline_state.json）
+│   ├── models.py               # 数据模型（VideoInfo, VideoState, QueueItem）
+│   ├── filter.py               # 视频过滤器
+│   ├── base_step.py            # 步骤基类
+│   ├── step_downloader.py      # Step B: 下载
+│   ├── step_asr.py             # Step C: 转录
+│   └── step_llm.py             # Step D+E: 校正 + 总结
+│
+├── utils/                      # 工具函数
+│   ├── md_to_epub.py           # Markdown → EPUB 转换
+│   ├── logger.py               # 日志配置
+│   └── reset_state.py          # 状态重置工具
+│
+├── prompts/                    # LLM Prompt 模板
+│   ├── correct.txt             # 文本校正
+│   ├── summarize.txt           # 内容总结
+│   ├── filter.txt              # AI 智能过滤
+│   └── identify_speakers.txt   # 说话人识别
+│
+├── tests/                      # 回归测试（41 个测试）
+│   ├── conftest.py             # 共享 fixture
+│   ├── test_models.py          # 数据模型测试
+│   ├── test_state.py           # 状态管理测试
+│   ├── test_filter.py          # 过滤器测试
+│   ├── test_step_llm.py        # LLM 步骤测试
+│   ├── test_epub.py            # EPUB 生成测试
+│   ├── test_md_to_epub.py      # Markdown 转换测试
+│   └── test_build_final_md.py  # 最终文档结构测试
+│
+└── output/                     # 输出目录
+    ├── pipeline_state.json     # 流水线状态
+    ├── pipeline_queue.json     # 当前队列
+    ├── media/                  # 下载的音频
+    ├── transcripts/            # 转录文本 (.md)
+    └── epub/                   # 生成的电子书
 ```
 
 ## 获取 Bilibili Cookies
 
 1. 打开浏览器，登录 bilibili.com
-2. 按 F12 打开开发者工具
-3. 切换到 Network 标签
-4. 刷新页面，找到任意 api.bilibili.com 请求
-5. 在 Request Headers 中找到 Cookie，提取:
-   - `SESSDATA`
-   - `bili_jct`
-   - `DedeUserID`
-   - `BUVID3`
+2. 按 F12 打开开发者工具 → Network 标签
+3. 刷新页面，找到 `api.bilibili.com` 请求
+4. 在 Request Headers → Cookie 中提取：`SESSDATA`、`bili_jct`、`DedeUserID`、`BUVID3`
 
-## 文件结构
+## 模型配置
 
-```
-Bilibili_AI_Summarizer/
-├── main.py              # CLI 入口
-├── config.yaml          # 配置文件 (需自行创建)
-├── filters.yaml         # 过滤规则
-├── clients/             # 客户端模块
-│   ├── bilibili.py      # B站 API
-│   ├── downloader.py    # 视频下载 (yt-dlp)
-│   ├── whisper_client.py # Whisper 转录
-│   └── weread_browser.py # 微信读书上传
-├── core/                # 核心逻辑
-│   ├── pipeline.py      # 流水线编排
-│   ├── state.py         # 状态管理
-│   └── models.py        # 数据模型
-├── utils/               # 工具函数
-└── output/              # 输出目录
-    ├── media/           # 下载的音频文件
-    ├── summaries/       # 转录文本 (.md)
-    └── epub/            # 生成的电子书
+| 模型 | 用途 | 配置位置 |
+|------|------|----------|
+| Qwen3-ASR | 语音识别 | `config.yaml` → `asr_engine: qwen_asr` |
+| Qwen3 8B | 文本校正 + 总结 | Ollama: `qwen3:8b` |
+
+模型存储位置：
+- HuggingFace: `E:/ai_models/huggingface/`
+- Ollama: `E:/ai_models/ollama/`
+
+## 测试
+
+```powershell
+& "e:\bilibili_summarizer_v3\venv\Scripts\python.exe" -m pytest tests/ -v
 ```
 
-## GPU 加速
-
-### macOS (Apple Silicon)
-Whisper 会自动使用 MPS 加速。
-
-### Windows (NVIDIA GPU)
-确保安装了 CUDA 版本的 PyTorch:
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-```
+详细测试说明见 [TESTING.md](TESTING.md)。

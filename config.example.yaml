@@ -19,10 +19,22 @@ whisper:
   device: "auto"            # 设备选择: auto/cpu/cuda/mps
   language: "zh"            # 语言: zh (中文)
 
+# WhisperX 配置 (支持说话人分离)
+whisperx:
+  enabled: false             # 是否启用 WhisperX (替代原版 Whisper)
+  hf_token: ""               # HuggingFace Token (pyannote 模型需要)
+  diarize: true              # 是否启用说话人分离
+  min_speakers: 1            # 最少说话人数
+  max_speakers: 5            # 最多说话人数
+
+# Ollama LLM 配置 (文本修正 + 总结)
+ollama:
+  model: "qwen3:8b"
+  base_url: "http://localhost:11434"
+
 # 流水线配置
 pipeline:
   max_items_per_run: 20     # 每次运行最多处理的视频数
-  max_age_days: 30          # 超过此天数的视频将被跳过
 
 # 输出路径
 output:

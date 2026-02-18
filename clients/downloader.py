@@ -8,8 +8,11 @@ from __future__ import annotations
 import subprocess
 import shutil
 import sys
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class VideoDownloader:
@@ -137,7 +140,7 @@ class VideoDownloader:
             print(f"Download timeout for {url}")
             return None
         except Exception as e:
-            print(f"Download error: {e}")
+            logger.error(f"Download error: {e}")
             return None
     
     def download_with_retry(
@@ -158,7 +161,7 @@ class VideoDownloader:
         """
         for attempt in range(max_retries + 1):
             if attempt > 0:
-                print(f"  Retry attempt {attempt}/{max_retries}...")
+                logger.info(f"  Retry attempt {attempt}/{max_retries}...")
             
             result = self.download(url, filename)
             if result:

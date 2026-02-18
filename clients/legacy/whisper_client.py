@@ -7,8 +7,11 @@ Automatically detects GPU/CPU and uses appropriate device.
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Suppress whisper's FP16 warning on CPU
 os.environ.setdefault("WHISPER_WARN_FP16", "0")
@@ -63,7 +66,7 @@ class WhisperClient:
             current_path = os.environ.get("PATH", "")
             if ffmpeg_location not in current_path:
                 os.environ["PATH"] = ffmpeg_location + os.pathsep + current_path
-                print(f"Whisper: Added ffmpeg to PATH: {ffmpeg_location}")
+                logger.info(f"Whisper: Added ffmpeg to PATH: {ffmpeg_location}")
         
         # Determine device
         if device == "auto":
@@ -71,7 +74,7 @@ class WhisperClient:
         else:
             self.device = device
         
-        print(f"Whisper: Using model '{model_name}' on device '{self.device}'")
+        logger.info(f"Whisper: Using model '{model_name}' on device '{self.device}'")
     
     def _detect_device(self) -> str:
         """Auto-detect the best available device."""
@@ -80,13 +83,13 @@ class WhisperClient:
             
             if torch.cuda.is_available():
                 gpu_name = torch.cuda.get_device_name(0)
-                print(f"Whisper: CUDA GPU detected: {gpu_name}")
+                logger.info(f"Whisper: CUDA GPU detected: {gpu_name}")
                 return "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                print("Whisper: Apple MPS detected")
+                logger.info("Whisper: Apple MPS detected")
                 return "mps"
             else:
-                print("Whisper: Using CPU")
+                logger.info("Whisper: Using CPU")
                 return "cpu"
         except ImportError:
             return "cpu"
@@ -104,16 +107,16 @@ class WhisperClient:
                     "Note: This also requires ffmpeg to be installed."
                 )
             
-            print(f"Loading Whisper model '{self.model_name}'...")
+            logger.info(f"Loading Whisper model '{self.model_name}'...")
             self._model = whisper.load_model(self.model_name, device=self.device)
-            print("Whisper model loaded.")
+            logger.info("Whisper model loaded.")
         
         return self._model
 
     def unload_model(self):
         """Unload the model from memory to save VRAM."""
         if self._model is not None:
-            print(f"Unloading Whisper model '{self.model_name}'...")
+            logger.info(f"Unloading Whisper model '{self.model_name}'...")
             self._model = None
             
             # Try to force garbage collection and empty CUDA cache
@@ -124,7 +127,7 @@ class WhisperClient:
                 import torch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    print("  ✓ CUDA cache cleared")
+                    logger.info("  ✓ CUDA cache cleared")
             except ImportError:
                 pass
     
@@ -174,7 +177,7 @@ class WhisperClient:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
         
-        print(f"Transcribing: {audio_path.name}...")
+        logger.info(f"Transcribing: {audio_path.name}...")
         
         # Build transcribe options
         transcribe_opts = {
@@ -195,7 +198,7 @@ class WhisperClient:
         # Get detected language
         detected_lang = result.get("language", self.language)
         if self.language is None:
-            print(f"  Detected language: {detected_lang}")
+            logger.info(f"  Detected language: {detected_lang}")
         
         return result, detected_lang
     
@@ -206,7 +209,7 @@ class WhisperClient:
                 from opencc import OpenCC
                 self._converter = OpenCC('t2s')  # Traditional to Simplified
             except ImportError:
-                print("Warning: opencc not installed, skipping Traditional to Simplified conversion")
+                logger.warning("Warning: opencc not installed, skipping Traditional to Simplified conversion")
                 return text
         return self._converter.convert(text)
     
@@ -224,7 +227,7 @@ class WhisperClient:
             author: Author/creator name.
             
         Returns:
-            Markdown formatted transcription.
+            Tuple of (Markdown formatted transcription, detected_language).
         """
         # Get raw result with segments for better paragraph splitting
         result, detected_lang = self._transcribe_raw(audio_path)
@@ -254,9 +257,9 @@ class WhisperClient:
             lines.append("")
         
         if not paragraphs:
-            return f"# {title}\n\n**UP主**: {author}\n\n---\n\n(转录失败或无文字内容)"
+            return f"# {title}\n\n**UP主**: {author}\n\n---\n\n(转录失败或无文字内容)", detected_lang
             
-        return "\n".join(lines)
+        return "\n".join(lines), detected_lang
     
     def _segments_to_paragraphs(
         self,

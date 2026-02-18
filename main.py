@@ -16,14 +16,27 @@ Usage:
 from __future__ import annotations
 
 # === Model Cache Configuration ===
-# Default to ~/ai_models if not specified
+# Set before any imports to ensure models download to E: drive
 import os
-MODEL_BASE = os.environ.get("MODEL_BASE_DIR", os.path.join(os.path.expanduser("~"), "ai_models")).replace("\\", "/")
+import sys
 
-os.environ.setdefault("XDG_CACHE_HOME", f"{MODEL_BASE}")
-os.environ.setdefault("WHISPER_CACHE", f"{MODEL_BASE}/whisper")
-os.environ.setdefault("HF_HOME", f"{MODEL_BASE}/huggingface")
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", f"{MODEL_BASE}/huggingface/hub")
+# Fix Windows terminal encoding
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+# Whisper uses XDG_CACHE_HOME for download_root (not WHISPER_CACHE)
+os.environ.setdefault("XDG_CACHE_HOME", "E:/ai_models")
+os.environ.setdefault("WHISPER_CACHE", "E:/ai_models/whisper")
+os.environ.setdefault("HF_HOME", "E:/ai_models/huggingface")
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "E:/ai_models/huggingface/hub")
+
+# Force TEMP to E: drive as C: is often full
+os.environ["TEMP"] = "E:/temp"
+os.environ["TMP"] = "E:/temp"
+from pathlib import Path
+Path("E:/temp").mkdir(parents=True, exist_ok=True)
 
 import argparse
 import json
@@ -34,6 +47,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.pipeline import Pipeline
+from utils import setup_logging
+import yaml
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -161,8 +176,8 @@ def main() -> int:
     # run command
     run_parser = subparsers.add_parser("run", help="Run complete pipeline (video by video)")
     run_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to process (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to process (default: from config)"
     )
     run_parser.add_argument(
         "--no-upload", action="store_false", dest="upload", default=True,
@@ -181,16 +196,16 @@ def main() -> int:
     # download command
     download_parser = subparsers.add_parser("download", help="Step B: Download audio")
     download_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to download (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to download (default: from config)"
     )
     download_parser.set_defaults(func=cmd_download)
 
     # transcribe command
     transcribe_parser = subparsers.add_parser("transcribe", help="Step C: Transcribe with Whisper")
     transcribe_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to transcribe (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to transcribe (default: from config)"
     )
     transcribe_parser.add_argument(
         "--headful", action="store_false", dest="headless", default=True,
@@ -201,16 +216,16 @@ def main() -> int:
     # correct command
     correct_parser = subparsers.add_parser("correct", help="Step D: Correct with Qwen3")
     correct_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to process (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to process (default: from config)"
     )
     correct_parser.set_defaults(func=cmd_correct)
 
     # summarize command
     summarize_parser = subparsers.add_parser("summarize", help="Step E: Summarize with Qwen3")
     summarize_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to process (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to process (default: from config)"
     )
     summarize_parser.set_defaults(func=cmd_summarize)
 
@@ -225,8 +240,8 @@ def main() -> int:
     # upload command
     upload_parser = subparsers.add_parser("upload", help="Step G: Upload to WeChat Reading")
     upload_parser.add_argument(
-        "--max-items", type=int, default=10,
-        help="Maximum items to upload (default: 10)"
+        "--max-items", type=int, default=None,
+        help="Maximum items to upload (default: from config)"
     )
     upload_parser.add_argument(
         "--headful", action="store_false", dest="headless", default=True,
@@ -239,6 +254,19 @@ def main() -> int:
     status_parser.set_defaults(func=cmd_status)
     
     args = parser.parse_args()
+    
+    # Initialize logging
+    config_file = args.config if args.config else PROJECT_ROOT / "config.yaml"
+    log_dir = Path("E:/bilibili_summarizer_v3/output") # Default fallback
+    log_level = "INFO"
+    if config_file.exists():
+        with open(config_file, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+            log_rel_path = cfg.get("output", {}).get("state_file", "output/pipeline_state.json")
+            log_dir = (config_file.parent / log_rel_path).parent
+            log_level = cfg.get("pipeline", {}).get("logging_level", "INFO")
+    
+    setup_logging(log_dir / "pipeline.log", level_name=log_level)
     
     if not args.command:
         parser.print_help()

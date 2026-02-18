@@ -139,6 +139,7 @@ def convert_md_to_epub(
     epub_path: Path,
     title: str,
     author: str = "",
+    pub_time: str = "",
 ) -> Path:
     """Convert a markdown file to EPUB.
     
@@ -147,6 +148,7 @@ def convert_md_to_epub(
         epub_path: Path for output EPUB file.
         title: Book title.
         author: Book author (optional).
+        pub_time: Publication time string (optional).
         
     Returns:
         Path to the created EPUB file.
@@ -154,6 +156,23 @@ def convert_md_to_epub(
     epub_path.parent.mkdir(parents=True, exist_ok=True)
 
     md = md_path.read_text(encoding="utf-8")
+    
+    # Inject pub_time after Author in the text if provided
+    if pub_time:
+        pub_line = f"**发布时间**: {pub_time}"
+        # Try to find a line starting with **UP主** or UP主：
+        pattern = re.compile(r'^(\*\*UP主\*\*|UP主)：.*$', re.MULTILINE)
+        if pattern.search(md):
+            md = pattern.sub(f"\\g<0>\n\n{pub_line}", md, count=1)
+        else:
+            # Fallback: find the title and insert after it
+            title_pattern = re.compile(rf'^# {re.escape(title)}.*$', re.MULTILINE)
+            if title_pattern.search(md):
+                md = title_pattern.sub(f"\\g<0>\n\n{pub_line}", md, count=1)
+            else:
+                # Last resort: just prepend
+                md = f"{pub_line}\n\n{md}"
+
     xhtml = md_to_html(md)
 
     book_id = str(uuid.uuid4())

@@ -56,6 +56,7 @@ class VideoState:
     epub_path: Optional[str] = None
     title: Optional[str] = None          # Video title
     up_name: Optional[str] = None        # Author name
+    language: Optional[str] = None       # Detected language (e.g. 'zh', 'en')
     error: Optional[str] = None
     
     def to_dict(self) -> dict:
@@ -73,6 +74,7 @@ class VideoState:
             "epub_path": self.epub_path,
             "title": self.title,
             "up_name": self.up_name,
+            "language": self.language,
             "error": self.error,
         }
     
@@ -93,6 +95,7 @@ class VideoState:
             epub_path=data.get("epub_path"),
             title=data.get("title"),
             up_name=data.get("up_name"),
+            language=data.get("language"),
             error=data.get("error"),
         )
 
