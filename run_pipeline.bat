@@ -8,9 +8,9 @@ title Bilibili Summarizer V3 - Auto Run
 if not exist "output\logs" mkdir output\logs
 echo [%date% %time%] --- Starting New Run --- >> output\logs\auto_run.log
 
-:: 设置项目路径
-set PROJECT_DIR=d:\Dropbox\Coding\Bilibili_Summarizer\bilibili_summarizer_v3
-set VENV_PATH=E:\bilibili_summarizer_v3\venv
+:: 设置项目路径 (默认为当前目录)
+set PROJECT_DIR=%~dp0
+set VENV_PATH=%PROJECT_DIR%venv
 
 echo ============================================================
 echo      Bilibili Summarizer V3 - 一键批量处理
