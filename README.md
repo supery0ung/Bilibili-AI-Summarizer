@@ -1,29 +1,31 @@
 # Bilibili Summarizer V3
 
-将 B站"稍后再看"视频自动转录为文字，AI 校正+总结，生成 EPUB 电子书，上传微信读书。
+Automatically transcribe Bilibili "Watch Later" videos to text, perform AI correction and summarization using **Qwen ASR**, generate EPUB ebooks, and upload to WeChat Reading.
 
-## 功能流程
+将 B站"稍后再看"视频自动转录为文字，使用 **Qwen ASR** 进行 AI 校正与总结，生成 EPUB 电子书，上传微信读书。
+
+## Workflow / 功能流程
 
 ```
-获取列表 → 过滤 → 下载音频 → ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
- Step A     A      Step B      Step C      Step D      Step E      Step F      Step G
+Fetch List → Filter → Download Audio → Qwen ASR Transcription → LLM Correction → LLM Summary → Generate EPUB → Upload to WeChat Reading
+获取列表 → 过滤 → 下载音频 → Qwen ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
 ```
 
-| 步骤 | 功能 | 技术 |
+| Step | Function / 功能 | Technology / 技术 |
 |------|------|------|
-| Step A | 获取稍后再看列表 + 规则过滤 + AI 过滤 | Bilibili API + Qwen3 |
-| Step B | 下载视频音频 | yt-dlp（并行下载） |
-| Step C | 语音转文字 | Qwen3-ASR / Whisper（本地） |
-| Step D | 校正转录文本（标点、分段、错别字） | Qwen3 8B（本地 Ollama） |
-| Step E | 生成内容摘要 | Qwen3 8B（本地 Ollama） |
-| Step F | 生成 EPUB 电子书 | 纯 Python |
-| Step G | 上传微信读书 | Playwright 浏览器自动化 |
+| Step A | Fetch & Filter / 获取 + 过滤 | Bilibili API + Qwen3 |
+| Step B | Download Audio / 下载音频 | yt-dlp (Parallel) |
+| Step C | ASR Transcription / 语音转文字 | **Qwen3-ASR** / Whisper (Local) |
+| Step D | AI Correction / 文档校正 | Qwen3 8B (Local Ollama) |
+| Step E | AI Summary / 内容总结 | Qwen3 8B (Local Ollama) |
+| Step F | Generate EPUB / 生成电子书 | Pure Python |
+| Step G | Upload to WeRead / 上传微信读书 | Playwright Automation |
 
-## 环境要求
+## Requirements / 环境要求
 
 - Python 3.10+
-- NVIDIA GPU（12GB+ VRAM 推荐）
-- [Ollama](https://ollama.com/) + `qwen3:8b` 模型
+- NVIDIA GPU (12GB+ VRAM Recommended)
+- [Ollama](https://ollama.com/) + `qwen3:8b` model
 - ffmpeg
 - yt-dlp
 
