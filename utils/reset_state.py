@@ -51,6 +51,6 @@ def reset_pipeline_state(state_file_path: str):
         print("No abnormal states found.")
 
 if __name__ == "__main__":
-    # Path from config.yaml
-    DEFAULT_STATE_FILE = r"E:\bilibili_summarizer_v3\output\pipeline_state.json"
+    # Default path from config.example.yaml.
+    DEFAULT_STATE_FILE = Path(__file__).resolve().parents[1] / "output" / "pipeline_state.json"
     reset_pipeline_state(DEFAULT_STATE_FILE)

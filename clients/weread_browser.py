@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import os
+import re
 import sys
 import logging
 from pathlib import Path
@@ -39,12 +40,12 @@ def _chrome_channel() -> Optional[str]:
 class WeReadBrowserClient:
     """Browser-based client for WeChat Reading upload."""
     
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, output_dir: Optional[str] = None):
         """Initialize browser client.
         
         Args:
             headless: Run browser in headless mode. 
-                      NOTE: For first login (QR scan), headless typically must be False.
+            output_dir: Directory to save debug screenshots.
         """
         if not PLAYWRIGHT_AVAILABLE:
             raise ImportError(
@@ -54,6 +55,7 @@ class WeReadBrowserClient:
             )
         
         self.headless = headless
+        self.output_dir = Path(output_dir) if output_dir else Path("output")
         self._current_headless = headless
         self._playwright = None
         self._context: Optional[BrowserContext] = None
@@ -101,8 +103,13 @@ class WeReadBrowserClient:
             if channel:
                 logger.warning(f"Chrome failed ({e}), falling back to Chromium...")
                 launch_kw.pop("channel", None)
-                self._context = self._playwright.chromium.launch_persistent_context(**launch_kw)
+                try:
+                    self._context = self._playwright.chromium.launch_persistent_context(**launch_kw)
+                except Exception:
+                    self.close()
+                    raise
             else:
+                self.close()
                 raise
         
         if self._context.pages:
@@ -111,6 +118,65 @@ class WeReadBrowserClient:
             self._page = self._context.new_page()
             
         return self._page
+
+    @staticmethod
+    def _normalized_title(value: str) -> str:
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE).lower()
+
+    @staticmethod
+    def _upload_completion_text_detected(value: str) -> bool:
+        compact = re.sub(r"\s+", "", value)
+        markers = (
+            "\u5bfc\u5165\u5b8c\u6210",  # 导入完成
+            "\u7acb\u5373\u9605\u8bfb",  # 立即阅读
+            "\u4e0a\u4f20\u6210\u529f",  # 上传成功
+            "\u5df2\u4e0a\u4f20",  # 已上传
+        )
+        return any(marker in compact for marker in markers)
+
+    def _goto_shelf(self, page: Page, attempts: int = 3) -> bool:
+        """Navigate to the WeRead shelf with retries for transient network timeouts."""
+        for attempt in range(1, attempts + 1):
+            try:
+                page.goto(
+                    "https://weread.qq.com/web/shelf",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                return True
+            except Exception as e:
+                logger.warning(
+                    f"  Shelf navigation failed (attempt {attempt}/{attempts}): {e}"
+                )
+                if attempt < attempts:
+                    time.sleep(5 * attempt)
+        return False
+
+    def _verify_uploaded_on_shelf(
+        self, page: Page, file_path: str, timeout_seconds: int = 30
+    ) -> bool:
+        """Confirm that the imported EPUB is visible on the bookshelf."""
+        expected = self._normalized_title(Path(file_path).stem)
+        needle = expected[:16]
+        if len(needle) < 4:
+            logger.error("  Cannot derive a reliable title for shelf verification.")
+            return False
+
+        try:
+            if not self._goto_shelf(page, attempts=2):
+                return False
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline:
+                body = page.locator("body").inner_text(timeout=5000)
+                if needle in self._normalized_title(body):
+                    logger.info("  ✓ Uploaded book verified on shelf.")
+                    return True
+                time.sleep(2)
+        except Exception as e:
+            logger.warning(f"  Shelf verification failed: {e}")
+
+        logger.error(f"  Uploaded book was not found on shelf: {Path(file_path).stem}")
+        return False
 
     def upload_epub(self, file_path: str) -> bool:
         """Upload an EPUB file to WeChat Reading.
@@ -129,7 +195,8 @@ class WeReadBrowserClient:
         
         # 1. Navigate to Shelf (bookshelf) - this usually triggers login if needed
         logger.debug("  Navigating to WeRead Shelf...")
-        page.goto("https://weread.qq.com/web/shelf", wait_until="domcontentloaded")
+        if not self._goto_shelf(page):
+            return False
         time.sleep(2)
         
         # 2. Check Login
@@ -146,21 +213,40 @@ class WeReadBrowserClient:
                     logger.info("  ⚠ Login required but running in headless mode. Restarting in headful mode...")
                     page = self._ensure_browser(force_headful=True)
                     logger.info("  Navigating back to shelf for login...")
-                    page.goto("https://weread.qq.com/web/shelf", wait_until="domcontentloaded")
+                    if not self._goto_shelf(page):
+                        return False
                     time.sleep(3)
+                
+                # Default timeout for login scanning (in seconds)
+                # Set to 0 for infinite as requested by user
+                login_timeout = int(os.environ.get("WEREAD_LOGIN_TIMEOUT", 0))
                 
                 print("\n" + "!" * 80)
                 print("  ⚠ PLEASE SCAN THE QR CODE IN THE BROWSER WINDOW TO LOG IN.")
-                print("  ⚠ 请在弹出的浏览器窗口中扫描二维码进行登录（已禁用超时，等待扫码中...）。")
+                print("  ⚠ 请在弹出的浏览器窗口中扫描二维码进行登录。")
+                
+                # Check for Session 0 (Services) which is usually invisible
+                # We can't definitively check but we can warn if not in a typical interactive session
+                if sys.platform == "win32" and os.environ.get("SESSIONNAME") == "Services":
+                    print("  ⚠ WARNING: Process is running in 'Services' session (Session 0).")
+                    print("  ⚠ The browser window will be INVISIBLE to you.")
+                    print("  ⚠ Please run the script manually or configure task scheduler to 'Run only when user is logged on'.")
+                
+                if login_timeout == 0:
+                    print("  ⚠ 等待登录超时时间: 无限制 (等待扫码中...)")
+                else:
+                    print(f"  ⚠ 等待登录超时时间: {login_timeout}s")
                 print("!" * 80 + "\n")
-                logger.info("  Waiting for login (No timeout, waiting indefinitely)...")
+                
+                logger.info(f"  Waiting for login (Timeout: {'Infinite' if login_timeout == 0 else login_timeout})...")
                 
                 # Wait for login success: look for shelf or profile indicators
                 try:
-                    page.wait_for_selector('.shelf_list, .shelfItem, .navBar_avatar', timeout=0)
+                    # playwright timeout=0 means infinite
+                    page.wait_for_selector('.shelf_list, .shelfItem, .navBar_avatar', timeout=login_timeout * 1000 if login_timeout > 0 else 0)
                     logger.info("  ✓ Login detected.")
-                except:
-                    # If timeout, maybe it's still stuck
+                except Exception as e:
+                    # This branch only reached if login_timeout > 0
                     current_url = page.url
                     if "shelf" not in current_url and "upload" not in current_url:
                         logger.error(f"  ❌ Login timed out or failed. Current URL: {current_url}")
@@ -174,7 +260,8 @@ class WeReadBrowserClient:
         # Double check we are on shelf
         if "shelf" not in page.url:
             logger.debug("  Redirecting to shelf...")
-            page.goto("https://weread.qq.com/web/shelf")
+            if not self._goto_shelf(page):
+                return False
             time.sleep(2)
 
         # 3. Click "Import" / "Upload" button
@@ -252,7 +339,8 @@ class WeReadBrowserClient:
                 
                 if not file_chooser_btn:
                     # Final debug screenshot
-                    debug_path = Path("output/debug_weread_upload_page.png")
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    debug_path = self.output_dir / "debug_weread_upload_page.png"
                     page.screenshot(path=str(debug_path))
                     logger.error(f"  ❌ Could not find file selection element on upload page. Screenshot: {debug_path}")
                     return False
@@ -275,7 +363,8 @@ class WeReadBrowserClient:
                 
             except Exception as e:
                 print(f"  ❌ Error during file selection: {e}")
-                debug_path = Path("output/debug_weread_upload_error.png")
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                debug_path = self.output_dir / "debug_weread_upload_error.png"
                 page.screenshot(path=str(debug_path))
                 return False
 
@@ -285,13 +374,23 @@ class WeReadBrowserClient:
             start_time = time.time()
             max_wait = 120 # 2 minutes
             last_screenshot_time = 0
+            saw_progress = False
             
             while time.time() - start_time < max_wait:
                 # 1. Take debug screenshot every 10s
                 if time.time() - last_screenshot_time > 10:
-                    debug_path = Path(f"output/debug_upload_progress_{int(time.time())}.png")
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    debug_path = self.output_dir / f"debug_upload_progress_{int(time.time())}.png"
                     page.screenshot(path=str(debug_path))
                     last_screenshot_time = time.time()
+
+                try:
+                    body_text = page.locator("body").inner_text(timeout=5000)
+                    if self._upload_completion_text_detected(body_text):
+                        logger.info("  ✓ Upload completion detected on upload page.")
+                        return True
+                except Exception as e:
+                    logger.debug(f"  Could not read upload page body text: {e}")
                 
                 # 2. Check for success/completion indicators
                 # We must be careful to avoid static help text like "上传完成后可在书架查看"
@@ -306,7 +405,7 @@ class WeReadBrowserClient:
                 if is_100_percent:
                     print("  ✓ 100% reached. Waiting for final processing...")
                     time.sleep(10) # Give it time to finish parsing
-                    return True
+                    return self._verify_uploaded_on_shelf(page, file_path)
 
                 # Check for success toast/message (excluding the help text)
                 success_detected = page.evaluate("""() => {
@@ -332,6 +431,7 @@ class WeReadBrowserClient:
                 }""")
                 
                 if progress_text:
+                    saw_progress = True
                     if progress_text != "0%": # Don't log 0% repeatedly
                         logger.info(f"  ... Upload Progress: {progress_text}")
                 else:
@@ -345,17 +445,17 @@ class WeReadBrowserClient:
                     }""")
                     
                     if not is_processing:
-                        # If we were seeing progress and now it's gone, and no error visible
-                        logger.debug("  ✓ Progress indicators disappeared. Final check...")
-                        time.sleep(5)
-                        return True
+                        if saw_progress:
+                            logger.debug("  Progress disappeared; verifying on shelf...")
+                            time.sleep(5)
+                            return self._verify_uploaded_on_shelf(page, file_path)
                     else:
                         logger.debug("  ... Still processing...")
                 
                 time.sleep(2)
             
             print(f"  ⚠ Upload monitoring timed out after {max_wait}s.")
-            return True # Try to proceed anyway as the file was sent
+            return False
 
         except Exception as e:
             print(f"  ❌ Upload process failed: {e}")

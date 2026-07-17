@@ -142,15 +142,15 @@ ollama:
 ```
 
 **模型存储位置**：
-- HuggingFace: `E:/ai_models/huggingface/`
-- Ollama: `E:/ai_models/ollama/`
+- HuggingFace: set `BILIBILI_MODEL_CACHE` (default: user cache directory)
+- Ollama: configure with Ollama's own model storage settings
 
 ---
 
 ## 🧪 测试
 
 ```powershell
-& "e:\bilibili_summarizer_v3\venv\Scripts\python.exe" -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 41 个回归测试，无需 GPU/网络，< 1 秒运行。详见 [TESTING.md](TESTING.md)。

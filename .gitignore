@@ -8,3 +8,8 @@ last_browser_prompt.md
 .gemini/
 .agent/
 brain/
+logs/
+
+# Local config holds live Bilibili credentials — keep it out of git.
+# Copy config.example.yaml to config.yaml and fill in your own values.
+config.yaml

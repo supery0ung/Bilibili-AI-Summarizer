@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 from clients.ollama_client import build_final_markdown
-from core.state import StateManager
+from core.state import StateManager, collect_epub_targets
 from utils.md_to_epub import convert_md_to_epub
 
 # Re-use the same sample data as conftest fixtures
@@ -94,12 +94,14 @@ class TestEpubPrioritization:
 
         assert "核心摘要" in xhtml, "EPUB from prioritized summary_md must contain summary"
 
-    def test_falls_back_to_transcript_md(
+    def test_summary_less_item_is_not_shipped(
         self,
         sample_transcript_md: Path,
         tmp_state_manager: StateManager,
     ):
-        """When summary_md is None, transcript_md is used."""
+        """When summary_md is None, the item must be skipped — NOT silently
+        converted from the raw transcript. (Older code fell back to
+        transcript_md here, which shipped EPUBs with no summary.)"""
         sm = tmp_state_manager
         bvid = "BV1fall"
         sm.update(
@@ -108,9 +110,8 @@ class TestEpubPrioritization:
             transcript_md=str(sample_transcript_md),
         )
 
-        vs = sm.get_video_state(bvid)
-        md_path = vs.summary_md or vs.transcript_md
-        assert md_path == str(sample_transcript_md)
+        targets = collect_epub_targets(sm)
+        assert targets == [], "an item without a summary must not become an EPUB"
 
 
 class TestEpubStructure:

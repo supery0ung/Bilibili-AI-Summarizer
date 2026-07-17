@@ -31,6 +31,11 @@ whisperx:
 ollama:
   model: "qwen3:8b"
   base_url: "http://localhost:11434"
+  correction_num_ctx: 12288      # 纠错使用较小上下文，降低 KV Cache 和首 token 延迟
+  summary_num_ctx: 32768         # 最终总结上下文
+  keep_alive: "30m"              # D/E 步之间保持模型常驻
+  hierarchical_summary_chars: 18000
+  summary_chunk_chars: 12000
 
 # 流水线配置
 pipeline:

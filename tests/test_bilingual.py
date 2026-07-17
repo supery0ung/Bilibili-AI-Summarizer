@@ -10,7 +10,7 @@ def mock_ollama_client(tmp_path):
     # Mock prompt loading
     with patch("clients.ollama_client.OllamaClient._load_prompt") as mock_load:
         # Minimal prompt for testing
-        mock_load.return_value = "Title: {title}\nExtra: {extra_instructions}\nText: {text}"
+        mock_load.return_value = "{language_hint}\n{extra_instructions}\nTitle: {title}\nAuthor: {author}\nSpeakers: {speaker_map}\nText: {text}"
         client = OllamaClient(base_url="http://localhost:11434")
         return client
 
@@ -30,7 +30,7 @@ def test_bilingual_hint_triggered_for_english(mock_ollama_client):
         args, kwargs = mock_generate.call_args
         prompt = args[0]
         assert "强制性双语要求" in prompt
-        assert "Original Paragraph" in prompt
+        assert "每一段原文" in prompt
         # The result should contain both if LLM returned both
         assert "English text" in result
         assert "中文翻译" in result

@@ -40,7 +40,7 @@ logger = logging.getLogger("benchmark")
 # ──────────────────────────────────────────────
 TEST_VIDEO_URL = "https://www.bilibili.com/video/BV1L9cPzdEfc"
 TEST_VIDEO_BVID = "BV1L9cPzdEfc"
-BENCHMARK_DIR = Path("E:/bilibili_summarizer_v3/output/benchmark")
+BENCHMARK_DIR = PROJECT_ROOT / "output" / "benchmark"
 
 # Load project config for credentials
 with open(PROJECT_ROOT / "config.yaml", "r", encoding="utf-8") as f:

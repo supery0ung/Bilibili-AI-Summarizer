@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import requests
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,174 @@ ASR_HALLUCINATION_PATTERNS = [
 ]
 
 
+def _detect_repetition(text: str, min_block_len: int = 50, threshold: float = 0.15) -> bool:
+    """Detect if text contains large repeated blocks.
+
+    Scans for any substring of length *min_block_len* that appears more than
+    once.  If the total number of repeated characters exceeds *threshold* of
+    the text length, the text is considered to have problematic repetition.
+
+    Returns True if repetition is detected.
+    """
+    if len(text) < min_block_len * 2:
+        return False
+
+    seen: dict[str, int] = {}
+    repeated_chars = 0
+    step = max(1, min_block_len // 4)
+
+    for i in range(0, len(text) - min_block_len + 1, step):
+        block = text[i:i + min_block_len]
+        if block in seen:
+            repeated_chars += min_block_len
+        else:
+            seen[block] = i
+
+    ratio = repeated_chars / len(text)
+    if ratio >= threshold:
+        logger.debug(f"Repetition ratio {ratio:.2%} exceeds threshold {threshold:.0%}")
+        return True
+    return False
+
+
+def _paragraphs_are_duplicate(a: str, b: str) -> bool:
+    """Return True if paragraph *a* is a duplicate / near-duplicate of *b*.
+
+    Three signals, any of which is enough:
+      1. Exact match.
+      2. High character-level similarity when aligned from the start
+         (catches repeats with minor word-level edits).
+      3. Containment: a representative 40-char slice of the shorter paragraph
+         appears verbatim in the longer one. This catches the common LLM
+         failure where a whole earlier block is re-emitted but split at a
+         different offset, so prefix-aligned comparison would miss it.
+    """
+    if a == b:
+        return True
+
+    min_len = min(len(a), len(b))
+    if min_len > 40:
+        matching = sum(1 for x, y in zip(a, b) if x == y)
+        if matching > min_len * 0.8:
+            return True
+
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        # Probe a slice from the middle of the shorter paragraph to avoid
+        # boilerplate prefixes (e.g. speaker tags) producing false positives.
+        start = len(shorter) // 4
+        probe = shorter[start:start + 40]
+        if len(probe) >= 40 and probe in longer:
+            return True
+
+    return False
+
+
+def _deduplicate_paragraphs(text: str) -> str:
+    """Remove duplicate and near-duplicate paragraphs anywhere in the text.
+
+    Unlike a consecutive-only pass, this compares each paragraph against every
+    previously kept paragraph, so a whole block that the LLM re-emits later
+    (with an unrelated paragraph in between) is still dropped.
+    """
+    paragraphs = text.split("\n\n")
+    deduped: list[str] = []
+    seen: list[str] = []  # stripped form of every kept paragraph
+
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            continue
+        if any(_paragraphs_are_duplicate(stripped, prev) for prev in seen):
+            continue
+        deduped.append(para)
+        seen.append(stripped)
+
+    return "\n\n".join(deduped)
+
+
+# Sentence terminators, used to snap loop-collapse cuts to clean boundaries.
+_SENT_TERM_RE = re.compile(r'[。！？!?]')
+
+# Motif lengths (chars) tried when scanning a paragraph for a repeated loop.
+# Longer first so the collapse latches onto the most specific repeating unit.
+_LOOP_MOTIF_LENS = (24, 16, 10)
+
+
+def _collapse_one_paragraph(para: str, max_scan: int = 4000) -> str:
+    """Collapse a degenerate loop within a single paragraph, if present.
+
+    Finds a fixed-length substring (motif) that recurs three or more times
+    without overlap, then drops everything from the *second* occurrence through
+    the last — snapping both cut points to sentence boundaries so the surviving
+    text reads cleanly. Recurses to catch multiple distinct loops.
+    """
+    if len(para) > max_scan:
+        return para
+
+    # Pick the motif with the most non-overlapping occurrences. A motif that
+    # spans the connector between repeats only matches every other copy, so
+    # going by raw count (tie-break: longer motif) latches onto the tightest
+    # in-phrase loop and collapses every copy in one pass.
+    best: Optional[tuple[tuple[int, int], int, list[int]]] = None
+    for motif_len in _LOOP_MOTIF_LENS:
+        if len(para) < motif_len * 3:
+            continue
+
+        positions: dict[str, list[int]] = {}
+        for i in range(len(para) - motif_len + 1):
+            positions.setdefault(para[i:i + motif_len], []).append(i)
+
+        for occ in positions.values():
+            if len(occ) < 3:
+                continue
+            # Keep only non-overlapping occurrences.
+            nonoverlap: list[int] = []
+            barrier = -1
+            for p in occ:
+                if p >= barrier:
+                    nonoverlap.append(p)
+                    barrier = p + motif_len
+            if len(nonoverlap) < 3:
+                continue
+
+            key = (len(nonoverlap), motif_len)
+            if best is None or key > best[0]:
+                best = (key, motif_len, nonoverlap)
+
+    if best is None:
+        return para
+
+    motif_len, nonoverlap = best[1], best[2]
+    second = nonoverlap[1]
+    final_end = nonoverlap[-1] + motif_len
+
+    # Cut start: snap back to the sentence boundary before the 2nd hit.
+    heads = list(_SENT_TERM_RE.finditer(para[:second]))
+    cut_start = heads[-1].end() if heads else second
+
+    # Cut end: snap forward past the sentence containing the last hit.
+    tail_match = _SENT_TERM_RE.search(para[final_end:])
+    cut_end = final_end + tail_match.end() if tail_match else final_end
+
+    collapsed = para[:cut_start] + para[cut_end:]
+    if collapsed != para:
+        return _collapse_one_paragraph(collapsed, max_scan)
+
+    return para
+
+
+def _collapse_internal_loops(text: str) -> str:
+    """Collapse degenerate loops *within* paragraphs across the whole text.
+
+    LLM degeneration sometimes repeats the same phrase many times inside one
+    paragraph, separated only by short connectors (e.g. "…救出师父。所以孙悟空说：
+    …救出师父。孙悟空想的是：…救出师父。"). Cross-paragraph dedup misses this because
+    it lives in one block, and the ratio-based repetition detector misses it
+    when the loop is only a localized fraction of a long chunk.
+    """
+    return "\n\n".join(_collapse_one_paragraph(p) for p in text.split("\n\n"))
+
+
 class OllamaClient:
     """Client for Ollama API to run local LLMs like Qwen3."""
 
@@ -36,10 +206,20 @@ class OllamaClient:
         model: str = "qwen3:8b",
         base_url: str = "http://localhost:11434",
         prompts_dir: Optional[Path] = None,
+        correction_num_ctx: int = 12288,
+        summary_num_ctx: int = 32768,
+        keep_alive: str = "30m",
+        hierarchical_summary_chars: int = 18000,
+        summary_chunk_chars: int = 12000,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.prompts_dir = Path(prompts_dir) if prompts_dir else PROMPTS_DIR
+        self.correction_num_ctx = correction_num_ctx
+        self.summary_num_ctx = summary_num_ctx
+        self.keep_alive = keep_alive
+        self.hierarchical_summary_chars = hierarchical_summary_chars
+        self.summary_chunk_chars = summary_chunk_chars
         self._verify_connection()
 
     def _verify_connection(self):
@@ -81,6 +261,7 @@ class OllamaClient:
                 prompt,
                 temperature=0.0,  # Deterministic
                 max_tokens=512,
+                think=False,
             ).upper().strip()
             
             if "SKIP" in result:
@@ -125,8 +306,17 @@ class OllamaClient:
     def generate(
         self,
         prompt: str,
+        system: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 8192,
+        stop_sequences: Optional[list[str]] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        think: Optional[bool] = None,
+        num_ctx: Optional[int] = None,
+        keep_alive: Optional[str] = None,
     ) -> str:
         """Generate text completion."""
         payload = {
@@ -137,20 +327,57 @@ class OllamaClient:
                 "temperature": temperature,
                 "num_predict": max_tokens,
             },
+            "keep_alive": (
+                keep_alive
+                if keep_alive is not None
+                else getattr(self, "keep_alive", "30m")
+            ),
         }
 
+        # Ollama native thinking control (for Qwen3.5 and other thinking models)
+        if think is not None:
+            payload["think"] = think
+
+        if top_p is not None: payload["options"]["top_p"] = top_p
+        if top_k is not None: payload["options"]["top_k"] = top_k
+        if presence_penalty is not None: payload["options"]["presence_penalty"] = presence_penalty
+        if repetition_penalty is not None: payload["options"]["repetition_penalty"] = repetition_penalty
+        if num_ctx is not None: payload["options"]["num_ctx"] = num_ctx
+
+        if system:
+            payload["system"] = system
+
+        if stop_sequences:
+            payload["options"]["stop"] = stop_sequences
+
+        started = time.perf_counter()
         resp = requests.post(
             f"{self.base_url}/api/generate",
             json=payload,
             timeout=600,  # 10 minutes for long generations
         )
         resp.raise_for_status()
-        
-        # Explicitly decode as UTF-8 to avoid platform-specific encoding issues
-        import json
+
         resp_json = json.loads(resp.content.decode('utf-8'))
+        wall_seconds = time.perf_counter() - started
+        load_seconds = resp_json.get("load_duration", 0) / 1_000_000_000
+        prompt_count = resp_json.get("prompt_eval_count", 0)
+        prompt_seconds = resp_json.get("prompt_eval_duration", 0) / 1_000_000_000
+        eval_count = resp_json.get("eval_count", 0)
+        eval_seconds = resp_json.get("eval_duration", 0) / 1_000_000_000
+        logger.info(
+            "Ollama timing: wall=%.1fs load=%.1fs prompt=%d (%.1f tok/s) "
+            "output=%d (%.1f tok/s)",
+            wall_seconds,
+            load_seconds,
+            prompt_count,
+            prompt_count / prompt_seconds if prompt_seconds else 0.0,
+            eval_count,
+            eval_count / eval_seconds if eval_seconds else 0.0,
+        )
+
         response = resp_json.get("response", "").strip()
-        
+
         return self._clean_response(response)
 
     def identify_speakers(self, text: str, title: str = "", author: str = "") -> dict[str, str]:
@@ -170,12 +397,13 @@ class OllamaClient:
                 prompt,
                 temperature=0.0,  # Strict JSON output
                 max_tokens=512,
+                think=False,
+                num_ctx=8192,
             )
             
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', result, re.DOTALL)
             if json_match:
-                import json
                 mapping = json.loads(json_match.group(0))
                 # Filter out null values and normalize keys (remove brackets)
                 normalized = {}
@@ -186,6 +414,11 @@ class OllamaClient:
                         # Fallback: if value is literally author name, map to "主持人"
                         if author and str(v).strip() == author:
                             v = "主持人"
+                        # Guard against hallucinated names: if the name doesn't
+                        # appear anywhere in the sample text, discard it
+                        if str(v) != "主持人" and str(v) not in sample_text:
+                            logger.warning(f"    [Speaker] Discarding hallucinated name '{v}' for {k} (not found in transcript)")
+                            continue
                         normalized[clean_k] = v
                 return normalized
             return {}
@@ -193,58 +426,6 @@ class OllamaClient:
         except Exception as e:
             logger.error(f"    [Error] Speaker identification failed: {e}")
             return {}
-
-    def correct_paragraph(self, text: str, title: str = "", author: str = "", speaker_map: dict = None, language: str = "zh") -> str:
-        """Correct a single paragraph of ASR text.
-        
-        Returns original text if correction fails or output is invalid.
-        """
-        if len(text.strip()) < 20:
-            return text
-        
-        try:
-            prompt_template = self._load_prompt("correct")
-            
-            # Format speaker map into a readable string
-            speaker_info = "无"
-            if speaker_map:
-                speaker_info = ", ".join([f"{k} 是 {v}" for k, v in speaker_map.items()])
-            
-            extra_instructions = ""
-            if language and language.lower() not in ("zh", "chinese", "cmn"):
-                extra_instructions = (
-                    "### 强制性双语要求 (Bilingual Requirement):\n"
-                    "1. **保留原文**：保留每一段原始语言文本。\n"
-                    "2. **紧跟翻译**：在每一段原文之后，换行附带简体中文翻译。\n"
-                    "3. **格式要求**：直接输出对比文本，不要包含任何如 '[Original Paragraph]' 或 '[中文翻译段落]' 之类的标签。"
-                )
-                
-            prompt = prompt_template.replace("{text}", text) \
-                                   .replace("{title}", title or "未知标题") \
-                                   .replace("{author}", author or "未知UP主") \
-                                   .replace("{speaker_map}", speaker_info) \
-                                   .replace("{language_hint}", "") \
-                                   .replace("{extra_instructions}", extra_instructions)
-            
-            result = self.generate(
-                prompt,
-                temperature=0.1,
-                max_tokens=len(text) * 2 + 500,
-            )
-            
-            # Validate result length
-            if len(result) < len(text) * 0.5 or len(result) > len(text) * 2:
-                return text
-                
-            return result
-            
-        except Exception as e:
-            logger.error(f"    [Error] Correction failed: {e}")
-            return text
-
-    def correct_text(self, text: str, title: str = "", author: str = "", speaker_map: dict = None, language: str = "zh", progress_callback=None) -> str:
-        """Deprecated: Use correct_text_batched for better performance."""
-        return self.correct_text_batched(text, title, author, speaker_map, language, progress_callback)
 
     def correct_text_batched(self, text: str, title: str = "", author: str = "", speaker_map: dict = None, language: str = "zh", progress_callback=None) -> str:
         """Correct full text by processing in larger chunks (much faster).
@@ -259,19 +440,22 @@ class OllamaClient:
         Returns:
             Corrected text with paragraphs preserved
         """
-        import re
         # Pattern to match speaker label at start of paragraph
         speaker_prefix_pattern = re.compile(r'^(\*\*\[[^\]]+\]\*\*[：:\s]*)')
-        
+
         paragraphs = [p for p in text.split("\n") if p.strip()]
         if not paragraphs:
             return text
 
-        # Group paragraphs into chunks (approx 2000-3000 chars)
+        # For non-Chinese content, use smaller chunks (1-2 paragraphs) so that
+        # bilingual output stays interleaved: English paragraph → Chinese translation.
+        # For Chinese content, use larger chunks for speed.
+        is_chinese = language and language.lower() in ("zh", "chinese", "cmn")
+        target_chunk_len = 4000 if is_chinese else 800
+
         chunks = []
         current_chunk = []
         current_len = 0
-        target_chunk_len = 2500
 
         for para in paragraphs:
             para_len = len(para)
@@ -282,53 +466,109 @@ class OllamaClient:
             else:
                 current_chunk.append(para)
                 current_len += para_len + 2
-        
+
         if current_chunk:
             chunks.append("\n\n".join(current_chunk))
+
+        # Pre-build prompt template parts (invariant across chunks)
+        prompt_template = self._load_prompt("correct")
+        speaker_info = "无"
+        if speaker_map:
+            speaker_info = ", ".join([f"{k} 是 {v}" for k, v in speaker_map.items()])
+
+        language_hint = ""
+        extra_instructions = ""
+        if not is_chinese:
+            language_hint = f"### 源文本语言：{language.upper()} (Source Language: {language.upper()})"
+            extra_instructions = (
+                "### 强制性双语要求 (Bilingual Requirement):\n"
+                "**格式**：每一段原文后面紧跟该段的中文翻译，交替排列。严禁把所有原文放一起再集中翻译。\n"
+                "示例：\n"
+                "```\n"
+                "English paragraph 1...\n"
+                "\n"
+                "第1段中文翻译...\n"
+                "\n"
+                "English paragraph 2...\n"
+                "\n"
+                "第2段中文翻译...\n"
+                "```\n"
+                "**规则**：\n"
+                "1. 先输出校正后的原文段落，紧接着输出该段的简体中文翻译。\n"
+                "2. 严禁添加 '[Original]'、'[翻译]' 等标签，直接输出文本。\n"
+                "3. 严禁遗漏任何段落的翻译。每一段原文都必须有对应翻译。"
+            )
+
+        # Pre-fill everything except {text} which varies per chunk
+        prompt_base = prompt_template \
+            .replace("{title}", title or "未知标题") \
+            .replace("{author}", author or "未知UP主") \
+            .replace("{speaker_map}", speaker_info) \
+            .replace("{language_hint}", language_hint) \
+            .replace("{extra_instructions}", extra_instructions)
 
         corrected_chunks = []
         for i, chunk in enumerate(chunks):
             if progress_callback:
                 progress_callback(i + 1, len(chunks))
-            
-            # For each chunk, we can either strip prefixes or send as is.
-            # Stripping is safer but more complex in chunks. 
-            # Let's try sending chunks directly with the speaker_map context.
+
             try:
-                prompt_template = self._load_prompt("correct")
-                speaker_info = "无"
-                if speaker_map:
-                    speaker_info = ", ".join([f"{k} 是 {v}" for k, v in speaker_map.items()])
+                prompt = prompt_base.replace("{text}", chunk)
                 
-                extra_instructions = ""
-                # Determine if we need bilingual output
-                is_chinese = language and language.lower() in ("zh", "chinese", "cmn")
-                if not is_chinese:
-                    extra_instructions = (
-                        "### 强制性双语要求 (Bilingual Requirement):\n"
-                        "1. **保留原文**：每一段必须先输出原始语言文本。\n"
-                        "2. **紧跟翻译**：在每一段原文之后，必须紧跟其对应的简体中文翻译。\n"
-                        "3. **格式要求**：直接输出双语对比文本，**严禁**包含任何如 '[Original Paragraph]' 或 '[中文翻译段落]' 这种额外的辅助标签。\n"
-                        "4. **严禁遗漏**：严禁只输出中文或只输出原文，必须保持双语对照。"
-                    )
-                    
-                prompt = prompt_template.replace("{text}", chunk) \
-                                       .replace("{title}", title or "未知标题") \
-                                       .replace("{author}", author or "未知UP主") \
-                                       .replace("{speaker_map}", speaker_info) \
-                                       .replace("{language_hint}", "") \
-                                       .replace("{extra_instructions}", extra_instructions)
-                
-                # Use higher max_tokens for chunks
+                # Qwen3.5 non-thinking mode: use Ollama's think=False
+                # + official HF recommended sampling params for non-thinking
+                # For bilingual chunks, cap max_tokens to ~3x chunk size to avoid runaway repetition
+                max_tok = len(chunk) * 3 + 500 if not is_chinese else 8192
                 batch_corrected = self.generate(
                     prompt,
-                    temperature=0.1,
-                    max_tokens=len(chunk) * 2 + 1000,
+                    temperature=0.25,
+                    max_tokens=min(max_tok, 8192),
+                    top_p=0.8,
+                    top_k=20,
+                    presence_penalty=1.5,
+                    repetition_penalty=1.0,
+                    think=False,
+                    num_ctx=getattr(self, "correction_num_ctx", 12288),
                 )
                 
+                if not is_chinese:
+                    # Clean up bilingual artifacts: remove "第N段中文翻译：" labels
+                    batch_corrected = re.sub(r'第\s*\d+\s*段中文翻译[：:]\s*\n?', '', batch_corrected)
+
+                # Detect runaway length (>4x input for non-Chinese, >2.5x for Chinese)
+                max_ratio = 4.0 if not is_chinese else 2.5
+                if len(batch_corrected) > len(chunk) * max_ratio:
+                    logger.warning(f"  Chunk {i+1} output too long ({len(batch_corrected)} vs {len(chunk)} chars), likely repetition. Keeping original.")
+                    corrected_chunks.append(chunk)
+                    continue
+
+                # Detect internal repetition within this chunk
+                if _detect_repetition(batch_corrected):
+                    logger.warning(f"  Chunk {i+1} has internal repetition, retrying with higher penalty...")
+                    # Retry once with stronger repetition penalty
+                    retry_corrected = self.generate(
+                        prompt,
+                        temperature=0.2,
+                        max_tokens=min(max_tok, 8192) if not is_chinese else 8192,
+                        top_p=0.8,
+                        top_k=20,
+                        presence_penalty=1.5,
+                        repetition_penalty=1.1,
+                        think=False,
+                        num_ctx=getattr(self, "correction_num_ctx", 12288),
+                    )
+                    if not _detect_repetition(retry_corrected) and len(retry_corrected) >= len(chunk) * 0.3:
+                        batch_corrected = retry_corrected
+                        logger.info(f"  Chunk {i+1} retry succeeded.")
+                    else:
+                        logger.warning(f"  Chunk {i+1} retry still has repetition. Keeping original.")
+                        corrected_chunks.append(chunk)
+                        continue
+
                 # Fallback if LLM fails or returns garbage
-                if len(batch_corrected) < len(chunk) * 0.3:
-                    logger.warning(f"  Chunk {i+1} correction seems too short, keeping original.")
+                min_ratio = 0.3
+                if len(batch_corrected) < len(chunk) * min_ratio:
+                    logger.warning(f"  Chunk {i+1} correction seems too short ({len(batch_corrected)} chars), keeping original.")
                     corrected_chunks.append(chunk)
                 else:
                     corrected_chunks.append(batch_corrected)
@@ -337,7 +577,13 @@ class OllamaClient:
                 corrected_chunks.append(chunk)
 
         result = "\n\n".join(corrected_chunks)
-        
+
+        # Collapse loops within a paragraph first, then drop duplicate blocks
+        # across the whole text (order matters: collapsing internal loops can
+        # turn two near-identical blocks into exact duplicates).
+        result = _collapse_internal_loops(result)
+        result = _deduplicate_paragraphs(result)
+
         # Post-process cleanup (consistent with original logic)
         result = re.sub(r'(\*\*\[[^\]]+\]\*\*[：:\s]*)\1+', r'\1', result)
         
@@ -350,13 +596,6 @@ class OllamaClient:
                 result = re.sub(tag_pattern, new_tag, result)
         
         result = re.sub(r'(\*\*\[[^\]]+\]\*\*\s*)\1+', r'\1', result)
-        return self._filter_asr_hallucinations(result)
-        
-        # Second cleanup pass: remove potential redundant name tags created by LLM and us
-        # e.g. "**[闫俊杰]** **[闫俊杰]** text"
-        result = re.sub(r'(\*\*\[[^\]]+\]\*\*\s*)\1+', r'\1', result)
-        
-        # Apply ASR hallucination filtering as final post-processing step
         return self._filter_asr_hallucinations(result)
 
     def summarize(
@@ -376,25 +615,87 @@ class OllamaClient:
             Markdown formatted summary with outline
         """
         try:
+            source_text = text
+            hierarchy_threshold = getattr(self, "hierarchical_summary_chars", 18000)
+            summary_chunk_chars = getattr(self, "summary_chunk_chars", 12000)
+            if len(text) > hierarchy_threshold:
+                chunks = self._split_summary_chunks(text, summary_chunk_chars)
+                logger.info(
+                    "Long transcript: generating %d section summaries before synthesis",
+                    len(chunks),
+                )
+                section_summaries = []
+                for index, chunk in enumerate(chunks, 1):
+                    section_prompt = (
+                        f"请提炼视频《{title}》第 {index}/{len(chunks)} 部分。"
+                        "必须忠于原文，保留关键人物、术语、数字、案例、论据和结论；"
+                        "不要补充原文没有的信息。输出简体中文的结构化要点，供最终总结使用。\n\n"
+                        f"{chunk}"
+                    )
+                    section_summaries.append(
+                        self.generate(
+                            section_prompt,
+                            temperature=0.25,
+                            max_tokens=1600,
+                            top_p=0.8,
+                            top_k=20,
+                            presence_penalty=1.5,
+                            repetition_penalty=1.0,
+                            think=False,
+                            num_ctx=getattr(self, "correction_num_ctx", 12288),
+                        )
+                    )
+                source_text = "\n\n".join(
+                    f"### 第 {i} 部分提炼\n{summary}"
+                    for i, summary in enumerate(section_summaries, 1)
+                )
+            text = source_text
             prompt_template = self._load_prompt("summarize")
             prompt = prompt_template.replace("{text}", text).replace("{title}", title or "未知标题").replace("{author}", author or "未知UP主")
             
+            # Qwen3.5 non-thinking mode with official HF sampling params
             result = self.generate(
                 prompt,
-                temperature=0.3,
+                temperature=0.7,
                 max_tokens=4096,
+                top_p=0.8,
+                top_k=20,
+                presence_penalty=1.5,
+                repetition_penalty=1.0,
+                think=False,
+                num_ctx=getattr(self, "summary_num_ctx", 32768),
             )
             
-            if len(result) < 100:
-                logger.warning(f"    [Warning] Summary too short ({len(result)} chars).")
+            if len(result) < 80:
+                raise RuntimeError(f"Summary too short ({len(result)} chars)")
             
             return result
         except requests.Timeout:
             logger.error("    [Error] Ollama summarization timed out.")
-            return f"总结失败：API 超时。原始内容长度: {len(text)}"
+            raise RuntimeError("Ollama summarization timed out")
         except Exception as e:
             logger.error(f"    [Error] Summarization failed: {e}")
-            return f"总结失败：{str(e)}"
+            raise
+
+    @staticmethod
+    def _split_summary_chunks(text: str, target_chars: int) -> list[str]:
+        """Split long text on paragraph boundaries for hierarchical summaries."""
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if not paragraphs:
+            return [text]
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for paragraph in paragraphs:
+            if current and current_len + len(paragraph) + 2 > target_chars:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            current.append(paragraph)
+            current_len += len(paragraph) + 2
+        if current:
+            chunks.append("\n\n".join(current))
+        return chunks
 
     def process_transcript(
         self,
@@ -415,7 +716,7 @@ class OllamaClient:
             dict with keys: corrected_text, summary, title, author
         """
         logger.info("Step 1/2: Correcting transcript...")
-        corrected = self.correct_text(text, progress_callback)
+        corrected = self.correct_text_batched(text, progress_callback=progress_callback)
         
         logger.info("Step 2/2: Generating summary...")
         summary = self.summarize(corrected, title=title, author=author)
@@ -468,7 +769,7 @@ def test_connection():
     """Quick test to verify Ollama is working."""
     try:
         client = OllamaClient()
-        response = client.generate("你好，请用一句话介绍自己。/no_think", max_tokens=100)
+        response = client.generate("你好，请用一句话介绍自己。", max_tokens=100, think=False)
         logger.info(f"Ollama test successful: {response[:100]}...")
         return True
     except Exception as e:

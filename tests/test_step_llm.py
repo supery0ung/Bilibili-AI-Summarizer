@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from core.models import QueueItem, VideoState
 from core.state import StateManager
-from clients.ollama_client import build_final_markdown
+from clients.ollama_client import build_final_markdown, _detect_repetition, _deduplicate_paragraphs
 
 # Same sample data as conftest fixtures
 SAMPLE_TITLE = "测试视频：AI 技术分析"
@@ -141,6 +141,39 @@ class TestSummarizeItemContract:
         assert "## 核心摘要" in final_md
         assert "## 要点列表" in final_md
         assert "## 完整文本" in final_md
+
+
+class TestRepetitionDetection:
+    """Test the repetition detection and deduplication helpers."""
+
+    def test_no_repetition_in_normal_text(self):
+        text = "这是一段正常的文本，没有重复的内容。" * 3
+        assert not _detect_repetition(text)
+
+    def test_detects_large_repeated_block(self):
+        block = "这是一段会被重复的长文本内容，包含了很多有意义的信息和细节描述。" * 5
+        text = block + "\n\n" + block  # same block repeated
+        assert _detect_repetition(text)
+
+    def test_dedup_exact_consecutive_paragraphs(self):
+        text = "段落一的内容\n\n段落二的内容\n\n段落二的内容\n\n段落三的内容"
+        result = _deduplicate_paragraphs(text)
+        assert result.count("段落二的内容") == 1
+        assert "段落一的内容" in result
+        assert "段落三的内容" in result
+
+    def test_dedup_near_duplicate_paragraphs(self):
+        para1 = "这是一段非常长的内容，描述了人工智能在各个领域中的广泛应用，包括医疗、教育、金融等多个方面。"
+        para2 = "这是一段非常长的内容，描述了人工智能在各个领域中的广泛应用，包括医疗、教育、金融等很多方面。"
+        text = f"{para1}\n\n{para2}\n\n另一段不同的内容"
+        result = _deduplicate_paragraphs(text)
+        # Should keep only first occurrence + the different paragraph
+        paragraphs = [p.strip() for p in result.split("\n\n") if p.strip()]
+        assert len(paragraphs) == 2
+
+    def test_short_text_no_false_positive(self):
+        assert not _detect_repetition("短文本")
+        assert not _detect_repetition("")
 
 
 class TestStatusFlowThroughLLM:

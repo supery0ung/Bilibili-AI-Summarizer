@@ -16,7 +16,8 @@ Usage:
 from __future__ import annotations
 
 # === Model Cache Configuration ===
-# Set before any imports to ensure models download to E: drive
+# Set before any model imports. Override these with BILIBILI_MODEL_CACHE and
+# BILIBILI_TEMP if you want models/temp files on a specific drive.
 import os
 import sys
 
@@ -26,17 +27,42 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding='utf-8')
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-# Whisper uses XDG_CACHE_HOME for download_root (not WHISPER_CACHE)
-os.environ.setdefault("XDG_CACHE_HOME", "E:/ai_models")
-os.environ.setdefault("WHISPER_CACHE", "E:/ai_models/whisper")
-os.environ.setdefault("HF_HOME", "E:/ai_models/huggingface")
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "E:/ai_models/huggingface/hub")
-
-# Force TEMP to E: drive as C: is often full
-os.environ["TEMP"] = "E:/temp"
-os.environ["TMP"] = "E:/temp"
 from pathlib import Path
-Path("E:/temp").mkdir(parents=True, exist_ok=True)
+
+MODEL_CACHE_ROOT = Path(
+    os.environ.get(
+        "BILIBILI_MODEL_CACHE",
+        Path.home() / ".cache" / "bilibili_summarizer" / "ai_models",
+    )
+)
+TEMP_ROOT = Path(
+    os.environ.get(
+        "BILIBILI_TEMP",
+        Path.home() / ".cache" / "bilibili_summarizer" / "temp",
+    )
+)
+
+# Whisper uses XDG_CACHE_HOME for download_root (not WHISPER_CACHE)
+os.environ.setdefault("XDG_CACHE_HOME", str(MODEL_CACHE_ROOT))
+os.environ.setdefault("WHISPER_CACHE", str(MODEL_CACHE_ROOT / "whisper"))
+os.environ.setdefault("HF_HOME", str(MODEL_CACHE_ROOT / "huggingface"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_CACHE_ROOT / "huggingface" / "hub"))
+
+# All required models (Qwen3-ASR, forced aligner, faster-whisper, and the
+# pyannote diarization stack under ~/.cache/torch/pyannote) are already cached
+# locally. Force HuggingFace offline so model loads use the cache directly and
+# never make a blocking huggingface.co revalidation call — that network call has
+# no timeout and a transient stall froze Step C indefinitely (no error, no
+# traceback) until the process was killed. To add a NEW model, run once with
+# HF_HUB_OFFLINE=0 in the environment to let it download. The short etag timeout
+# is a belt-and-suspenders bound for whenever offline mode is disabled.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+
+# Keep large temp files out of the repository. Override with BILIBILI_TEMP.
+os.environ["TEMP"] = str(TEMP_ROOT)
+os.environ["TMP"] = str(TEMP_ROOT)
+TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 import argparse
 import json
@@ -54,9 +80,16 @@ import yaml
 def cmd_run(args: argparse.Namespace) -> int:
     """Run complete pipeline - processes videos one by one."""
     pipeline = Pipeline(args.config, headless=args.headless)
+    
+    # Resume from saved artifacts instead of repeating completed stages.
+    recovered_count = pipeline.state.recover_interrupted_items()
+    if recovered_count > 0:
+        print(f"INFO: Recovered {recovered_count} interrupted items from saved artifacts.")
+    
     results = pipeline.run_all(
         max_items=args.max_items,
-        upload=getattr(args, 'upload', False)
+        upload=getattr(args, 'upload', False),
+        manual_urls=getattr(args, 'url', None)
     )
     return 0 if results.get("error", 0) == 0 else 1
 
@@ -64,7 +97,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Step A: Fetch + filter + build queue."""
     pipeline = Pipeline(args.config)
-    queue = pipeline.run_step_a()
+    queue = pipeline.run_step_a(manual_urls=getattr(args, 'url', None))
 
     if queue:
         print("\nQueued videos:")
@@ -79,7 +112,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 def cmd_download(args: argparse.Namespace) -> int:
     """Step B: Download audio from videos."""
     pipeline = Pipeline(args.config)
-    stats = pipeline.run_step_b_download(max_items=args.max_items)
+    stats, _ = pipeline.run_step_b_download(max_items=args.max_items)
 
     if stats.get("error", 0) > 0 or stats.get("download_failed", 0) > 0:
         return 1
@@ -89,7 +122,8 @@ def cmd_download(args: argparse.Namespace) -> int:
 def cmd_transcribe(args: argparse.Namespace) -> int:
     """Step C: Transcribe downloaded audio with Whisper."""
     pipeline = Pipeline(args.config, headless=args.headless)
-    stats = pipeline.run_step_c_transcribe(max_items=args.max_items)
+    result = pipeline.run_step_c_transcribe(max_items=args.max_items)
+    stats = result[0] if isinstance(result, tuple) else result
 
     if stats.get("error", 0) > 0:
         return 1
@@ -99,21 +133,24 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 def cmd_correct(args: argparse.Namespace) -> int:
     """Step D: Correct transcripts with Qwen3."""
     pipeline = Pipeline(args.config)
-    stats = pipeline.run_step_d_correct(max_items=args.max_items)
+    result = pipeline.run_step_d_correct(max_items=args.max_items)
+    stats = result[0] if isinstance(result, tuple) else result
     return 0 if stats.get("error", 0) == 0 else 1
 
 
 def cmd_summarize(args: argparse.Namespace) -> int:
     """Step E: Summarize corrected transcripts with Qwen3."""
     pipeline = Pipeline(args.config)
-    stats = pipeline.run_step_e_summarize(max_items=args.max_items)
+    result = pipeline.run_step_e_summarize(max_items=args.max_items)
+    stats = result[0] if isinstance(result, tuple) else result
     return 0 if stats.get("error", 0) == 0 else 1
 
 
 def cmd_epub(args: argparse.Namespace) -> int:
     """Step F: Convert transcripts to EPUB."""
     pipeline = Pipeline(args.config)
-    stats = pipeline.run_step_f_epub(force_all=getattr(args, 'force_all', False))
+    result = pipeline.run_step_f_epub(force_all=getattr(args, 'force_all', False))
+    stats = result[0] if isinstance(result, tuple) else result
     return 0 if stats.get("error", 0) == 0 else 1
 
 
@@ -184,6 +221,10 @@ def main() -> int:
         help="Do NOT upload generated EPUBs to WeChat Reading"
     )
     run_parser.add_argument(
+        "--url", type=str, nargs="+",
+        help="Process specific Bilibili URLs (bypasses filters)"
+    )
+    run_parser.add_argument(
         "--headful", action="store_false", dest="headless", default=True,
         help="Run browser in headful (visible) mode instead of headless"
     )
@@ -191,6 +232,10 @@ def main() -> int:
 
     # fetch command
     fetch_parser = subparsers.add_parser("fetch", help="Fetch + filter + build queue")
+    fetch_parser.add_argument(
+        "--url", type=str, nargs="+",
+        help="Fetch specific Bilibili URLs (bypasses filters)"
+    )
     fetch_parser.set_defaults(func=cmd_fetch)
 
     # download command
@@ -257,7 +302,7 @@ def main() -> int:
     
     # Initialize logging
     config_file = args.config if args.config else PROJECT_ROOT / "config.yaml"
-    log_dir = Path("E:/bilibili_summarizer_v3/output") # Default fallback
+    log_dir = PROJECT_ROOT / "output" # Default fallback
     log_level = "INFO"
     if config_file.exists():
         with open(config_file, 'r', encoding='utf-8') as f:

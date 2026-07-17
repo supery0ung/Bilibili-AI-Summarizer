@@ -1,31 +1,29 @@
 # Bilibili Summarizer V3
 
-Automatically transcribe Bilibili "Watch Later" videos to text, perform AI correction and summarization using **Qwen ASR**, generate EPUB ebooks, and upload to WeChat Reading.
+将 B站"稍后再看"视频自动转录为文字，AI 校正+总结，生成 EPUB 电子书，上传微信读书。
 
-将 B站"稍后再看"视频自动转录为文字，使用 **Qwen ASR** 进行 AI 校正与总结，生成 EPUB 电子书，上传微信读书。
-
-## Workflow / 功能流程
+## 功能流程
 
 ```
-Fetch List → Filter → Download Audio → Qwen ASR Transcription → LLM Correction → LLM Summary → Generate EPUB → Upload to WeChat Reading
-获取列表 → 过滤 → 下载音频 → Qwen ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
+获取列表 → 过滤 → 下载音频 → ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
+ Step A     A      Step B      Step C      Step D      Step E      Step F      Step G
 ```
 
-| Step | Function / 功能 | Technology / 技术 |
+| 步骤 | 功能 | 技术 |
 |------|------|------|
-| Step A | Fetch & Filter / 获取 + 过滤 | Bilibili API + Qwen3 |
-| Step B | Download Audio / 下载音频 | yt-dlp (Parallel) |
-| Step C | ASR Transcription / 语音转文字 | **Qwen3-ASR** / Whisper (Local) |
-| Step D | AI Correction / 文档校正 | Qwen3 8B (Local Ollama) |
-| Step E | AI Summary / 内容总结 | Qwen3 8B (Local Ollama) |
-| Step F | Generate EPUB / 生成电子书 | Pure Python |
-| Step G | Upload to WeRead / 上传微信读书 | Playwright Automation |
+| Step A | 获取稍后再看列表 + 规则过滤 + AI 过滤 | Bilibili API + Qwen3 |
+| Step B | 下载视频音频 | yt-dlp（并行下载） |
+| Step C | 语音转文字 | Qwen3-ASR / Whisper（本地） |
+| Step D | 校正转录文本（标点、分段、错别字） | Qwen3 8B（本地 Ollama） |
+| Step E | 生成内容摘要 | Qwen3 8B（本地 Ollama） |
+| Step F | 生成 EPUB 电子书 | 纯 Python |
+| Step G | 上传微信读书 | Playwright 浏览器自动化 |
 
-## Requirements / 环境要求
+## 环境要求
 
 - Python 3.10+
-- NVIDIA GPU (12GB+ VRAM Recommended)
-- [Ollama](https://ollama.com/) + `qwen3:8b` model
+- NVIDIA GPU（12GB+ VRAM 推荐）
+- [Ollama](https://ollama.com/) + `qwen3:8b` 模型
 - ffmpeg
 - yt-dlp
 
@@ -67,6 +65,10 @@ python main.py upload --max-items 5     # Step G: 上传微信读书
 
 # 查看状态
 python main.py status
+
+# 处理指定视频 (绕过稍后再看列表和过滤器)
+python main.py run --url https://www.bilibili.com/video/BV1xxxxxx
+python main.py run --url BV1xxxxxx BV1yyyyyy # 支持多个 BV 号
 ```
 
 ## 输出文件
@@ -147,17 +149,17 @@ bilibili_summarizer_v3/
 
 | 模型 | 用途 | 配置位置 |
 |------|------|----------|
-| Qwen3-ASR | 语音识别 | `config.yaml` → `asr_engine: qwen_asr` |
-| Qwen3 8B | 文本校正 + 总结 | Ollama: `qwen3:8b` |
+| Qwen3-ASR | 语音识别 (1.7B SOTA) | `config.yaml` → `qwen3: model: "Qwen/Qwen3-ASR-1.7B"` |
+| Qwen 3.5 9B | 文本校正 + 总结 | Ollama: `qwen3.5:9b` |
 
 模型存储位置：
-- HuggingFace: `E:/ai_models/huggingface/`
-- Ollama: `E:/ai_models/ollama/`
+- HuggingFace: set `BILIBILI_MODEL_CACHE` (default: user cache directory)
+- Ollama: configure with Ollama's own model storage settings
 
 ## 测试
 
 ```powershell
-& "e:\bilibili_summarizer_v3\venv\Scripts\python.exe" -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 详细测试说明见 [TESTING.md](TESTING.md)。

@@ -10,18 +10,35 @@ from typing import Optional
 from .base_step import BaseStep
 from .models import QueueItem
 from .state import now_iso
-from clients.ollama_client import build_final_markdown
+from clients.ollama_client import (
+    build_final_markdown,
+    _detect_repetition,
+    _deduplicate_paragraphs,
+    _collapse_internal_loops,
+)
 
 class StepLLM(BaseStep):
     """Steps D & E: Correct and Summarize transcripts with LLM."""
     
-    def run(self, max_items: Optional[int] = None) -> dict[str, int]:
+    def run(
+        self,
+        max_items: Optional[int] = None,
+        mode: str = "both",
+        unload_after: bool = True,
+    ) -> tuple[dict[str, int], list[str]]:
+        if mode not in {"correct", "summarize", "both"}:
+            raise ValueError(f"Unsupported LLM step mode: {mode}")
         max_items = self.get_max_items(max_items)
-        self.logger.info(f"=== Steps D & E: LLM Correct & Summarize (max {max_items}) ===")
+        label = {
+            "correct": "Step D: LLM Correct",
+            "summarize": "Step E: LLM Summarize",
+            "both": "Steps D & E: LLM Correct & Summarize",
+        }[mode]
+        self.logger.info(f"=== {label} (max {max_items}) ===")
         
         queue = self.load_queue()
         if not queue:
-            return {"error": 1}
+            return {"error": 1}, []
         
         stats = {
             "processed": 0,
@@ -36,19 +53,37 @@ class StepLLM(BaseStep):
                 break
             
             status = self.state.get_status(item.bvid)
-            # Only process items with raw transcripts
-            if status not in ("transcript_ready", "correcting", "corrected", "summarizing"):
+            allowed = {
+                "correct": {"transcript_ready", "correcting"},
+                "summarize": {"corrected", "summarizing"},
+                "both": {"transcript_ready", "correcting", "corrected", "summarizing"},
+            }[mode]
+            if status not in allowed:
                 continue
             
             video_state = self.state.get_video_state(item.bvid)
-            if not video_state.transcript_md or not Path(video_state.transcript_md).exists():
+            needs_transcript = mode in ("correct", "both") and status in (
+                "transcript_ready", "correcting"
+            )
+            needs_corrected = mode in ("summarize", "both") and status in (
+                "corrected", "summarizing"
+            )
+            if needs_transcript and (
+                not video_state.transcript_md
+                or not Path(video_state.transcript_md).exists()
+            ):
+                continue
+            if needs_corrected and (
+                not video_state.corrected_md
+                or not Path(video_state.corrected_md).exists()
+            ):
                 continue
             
             self.logger.info(f"LLM Processing: {item.title[:60]}...")
             
             try:
                 # Step D: Correction
-                if status in ("transcript_ready", "correcting"):
+                if mode in ("correct", "both") and status in ("transcript_ready", "correcting"):
                     self.state.update(item.bvid, status="correcting", last_attempt=now_iso())
                     corrected_path = self._correct_item(item, video_state)
                     if corrected_path:
@@ -58,8 +93,9 @@ class StepLLM(BaseStep):
                         status = "corrected"
                 
                 # Step E: Summarization
-                if status in ("corrected", "summarizing"):
+                if mode in ("summarize", "both") and status in ("corrected", "summarizing"):
                     self.state.update(item.bvid, status="summarizing", last_attempt=now_iso())
+                    video_state = self.state.get_video_state(item.bvid)
                     final_path = self._summarize_item(item, video_state)
                     if final_path:
                         stats["summarized"] += 1
@@ -74,7 +110,11 @@ class StepLLM(BaseStep):
             stats["processed"] += 1
 
         # Explicitly unload model after the batch
-        if hasattr(self.pipeline.ollama, "unload_model"):
+        if (
+            unload_after
+            and stats["processed"]
+            and hasattr(self.pipeline.ollama, "unload_model")
+        ):
             self.pipeline.ollama.unload_model()
             
         return stats, processed_bvids
@@ -91,11 +131,16 @@ class StepLLM(BaseStep):
         else:
             raw_text = content
         
-        # Identify speakers
-        self.logger.info(f"  Identifying speakers...")
-        speaker_map = self.pipeline.ollama.identify_speakers(
-            raw_text, title=item.title, author=item.up_name
-        )
+        # Skip speaker identification if transcript has no speaker labels
+        has_speakers = "**[" in raw_text or "SPEAKER" in raw_text or "说话人" in raw_text
+        speaker_map = {}
+        if has_speakers:
+            self.logger.info(f"  Identifying speakers...")
+            speaker_map = self.pipeline.ollama.identify_speakers(
+                raw_text, title=item.title, author=item.up_name
+            )
+        else:
+            self.logger.info(f"  Single speaker, skipping speaker identification.")
         
         # Batch Correction (NEW: much faster)
         self.logger.info(f"  Correcting text (batch mode)...")
@@ -107,11 +152,36 @@ class StepLLM(BaseStep):
             language=getattr(video_state, 'language', 'zh')
         )
         
+        # Final validation: check the whole corrected output for repetition
+        max_retries = 2
+        for attempt in range(max_retries):
+            if not _detect_repetition(corrected_text):
+                break
+            self.logger.warning(f"  Corrected text has repetition (attempt {attempt+1}/{max_retries}), re-running correction...")
+            corrected_text = self.pipeline.ollama.correct_text_batched(
+                raw_text,
+                title=item.title,
+                author=item.up_name,
+                speaker_map=speaker_map,
+                language=getattr(video_state, 'language', 'zh')
+            )
+
+        if _detect_repetition(corrected_text):
+            # Last-resort cleanup: collapse in-paragraph loops and drop duplicate
+            # blocks. If that still leaves repetition, the LLM output is
+            # unreliable for this transcript — fall back to the raw (uncorrected
+            # but complete) text rather than shipping looped/truncated content.
+            self.logger.warning(f"  Corrected text still has repetition after retries, applying loop/dup cleanup.")
+            corrected_text = _deduplicate_paragraphs(_collapse_internal_loops(corrected_text))
+            if _detect_repetition(corrected_text):
+                self.logger.warning(f"  Cleanup insufficient, falling back to raw transcript text.")
+                corrected_text = raw_text
+
         # Build corrected markdown
         corrected_md = f"# {item.title}\n\n**UP主**: {item.up_name}\n\n---\n\n{corrected_text}"
         corrected_path = transcript_path.with_suffix(".corrected.md")
         corrected_path.write_text(corrected_md, encoding="utf-8")
-        
+
         self.state.update(item.bvid, status="corrected", corrected_md=str(corrected_path))
         self.logger.info(f"  ✓ Corrected: {corrected_path.name}")
         return corrected_path
@@ -129,6 +199,8 @@ class StepLLM(BaseStep):
         
         self.logger.info("  Generating summary...")
         summary = self.pipeline.ollama.summarize(corrected_text, title=item.title, author=item.up_name)
+        if not summary or len(summary.strip()) < 80 or summary.lstrip().startswith("总结失败"):
+            raise RuntimeError("Summary generation returned invalid or incomplete content")
         
         final_md = build_final_markdown(
             title=item.title, author=item.up_name, summary=summary, corrected_text=corrected_text

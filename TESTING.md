@@ -2,13 +2,13 @@
 
 ## 概述
 
-本项目使用 **pytest** 进行回归测试，共 **44 个测试**，覆盖流水线的每个关键环节。所有测试使用 fixture 数据，无需 GPU、Ollama 或网络连接，运行时间 < 1 秒。
+本项目使用 **pytest** 进行回归测试，共 **92 个测试**，覆盖流水线的关键环节。所有测试使用 fixture 数据，无需 GPU、Ollama 或网络连接，通常在 10 秒内完成。
 
 ## 运行方式
 
 ```bash
-cd d:\Dropbox\Coding\Bilibili_Summarizer\bilibili_summarizer_v3
-& "e:\bilibili_summarizer_v3\venv\Scripts\python.exe" -m pytest tests/ -v
+cd bilibili_summarizer_v3
+python -m pytest tests/ -v
 ```
 
 ## 测试策略

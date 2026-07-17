@@ -19,6 +19,7 @@ class VideoInfo:
     cid: Optional[int] = None
     pubdate: Optional[int] = None # Unix timestamp
     youtube_url: Optional[str] = None
+    is_manual: bool = False
     
     @classmethod
     def from_api_response(cls, item: dict) -> "VideoInfo":
@@ -58,6 +59,7 @@ class VideoState:
     up_name: Optional[str] = None        # Author name
     language: Optional[str] = None       # Detected language (e.g. 'zh', 'en')
     error: Optional[str] = None
+    is_manual: bool = False
     
     def to_dict(self) -> dict:
         return {
@@ -76,6 +78,7 @@ class VideoState:
             "up_name": self.up_name,
             "language": self.language,
             "error": self.error,
+            "is_manual": self.is_manual,
         }
     
     @classmethod
@@ -97,6 +100,7 @@ class VideoState:
             up_name=data.get("up_name"),
             language=data.get("language"),
             error=data.get("error"),
+            is_manual=data.get("is_manual", False),
         )
 
 
@@ -110,6 +114,7 @@ class QueueItem:
     duration: int
     up_name: str
     pubdate: Optional[int] = None
+    is_manual: bool = False
     
     def to_dict(self) -> dict:
         return {
@@ -119,6 +124,7 @@ class QueueItem:
             "duration": self.duration,
             "up_name": self.up_name,
             "pubdate": self.pubdate,
+            "is_manual": self.is_manual,
         }
     
     @classmethod
@@ -130,6 +136,7 @@ class QueueItem:
             duration=data.get("duration", 0),
             up_name=data.get("up_name", ""),
             pubdate=data.get("pubdate"),
+            is_manual=data.get("is_manual", False),
         )
     
     @classmethod
@@ -141,4 +148,5 @@ class QueueItem:
             duration=video.duration,
             up_name=video.up_name,
             pubdate=video.pubdate,
+            is_manual=video.is_manual,
         )

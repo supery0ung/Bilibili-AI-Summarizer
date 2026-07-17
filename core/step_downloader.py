@@ -90,8 +90,8 @@ class StepDownloader(BaseStep):
         self.state.update(item.bvid, status="downloading", title=item.title, up_name=item.up_name, last_attempt=now_iso())
         
         safe_name = safe_filename(f"{item.bvid}_{item.title[:50]}")
-        audio_path = self.pipeline.downloader.download_with_retry(item.url, safe_name)
-        
+        audio_path, err = self.pipeline.downloader.download_with_retry(item.url, safe_name)
+
         if audio_path:
             self.state.update(
                 item.bvid,
@@ -102,12 +102,16 @@ class StepDownloader(BaseStep):
             )
             self.logger.info(f"  ✓ Saved: {audio_path.name}")
             return True
+        elif err == "skip":
+            self.state.update(item.bvid, status="skipped", error="Video unavailable/paid/deleted")
+            self.logger.info(f"  ↷ Skipped (unavailable): {item.title[:50]}")
+            return False
         else:
             self.state.update(
                 item.bvid,
                 status="error",
-                error="Download failed",
+                error=f"Download failed ({err})",
                 last_attempt=now_iso(),
             )
-            self.logger.error(f"  ✗ Download failed: {item.title[:50]}")
+            self.logger.error(f"  ✗ Download failed [{err}]: {item.title[:50]}")
             return False
