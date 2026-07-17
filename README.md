@@ -1,165 +1,182 @@
-# Bilibili Summarizer V3
+# Bilibili AI Summarizer
 
-将 B站"稍后再看"视频自动转录为文字，AI 校正+总结，生成 EPUB 电子书，上传微信读书。
+Turn videos from your Bilibili Watch Later list into readable EPUB ebooks.
 
-## 功能流程
+The pipeline fetches videos, filters them, downloads audio, transcribes speech locally, cleans and summarizes the transcript with a local LLM, builds an EPUB, and can upload the result to WeChat Reading.
 
+## Pipeline
+
+```text
+Fetch -> Filter -> Download audio -> Transcribe -> Correct -> Summarize -> EPUB -> Upload
+ Step A   Step A       Step B          Step C      Step D     Step E     Step F  Step G
 ```
-获取列表 → 过滤 → 下载音频 → ASR 转录 → LLM 校正 → LLM 总结 → 生成 EPUB → 上传微信读书
- Step A     A      Step B      Step C      Step D      Step E      Step F      Step G
-```
 
-| 步骤 | 功能 | 技术 |
-|------|------|------|
-| Step A | 获取稍后再看列表 + 规则过滤 + AI 过滤 | Bilibili API + Qwen3 |
-| Step B | 下载视频音频 | yt-dlp（并行下载） |
-| Step C | 语音转文字 | Qwen3-ASR / Whisper（本地） |
-| Step D | 校正转录文本（标点、分段、错别字） | Qwen3 8B（本地 Ollama） |
-| Step E | 生成内容摘要 | Qwen3 8B（本地 Ollama） |
-| Step F | 生成 EPUB 电子书 | 纯 Python |
-| Step G | 上传微信读书 | Playwright 浏览器自动化 |
+| Step | Purpose | Main tools |
+| --- | --- | --- |
+| A | Fetch Bilibili Watch Later items and filter videos | Bilibili API, rules, Qwen/Ollama |
+| B | Download audio | yt-dlp |
+| C | Transcribe audio | Qwen3-ASR or Whisper |
+| D | Correct transcript text | Ollama |
+| E | Generate summary sections | Ollama |
+| F | Build EPUB | Pure Python EPUB writer |
+| G | Upload EPUB | Playwright browser automation |
 
-## 环境要求
+## Requirements
 
 - Python 3.10+
-- NVIDIA GPU（12GB+ VRAM 推荐）
-- [Ollama](https://ollama.com/) + `qwen3:8b` 模型
 - ffmpeg
 - yt-dlp
+- Ollama with a local model such as `qwen3:8b`
+- Optional but recommended: NVIDIA GPU for ASR
+- Optional: Playwright browser install for WeChat Reading upload
 
-## 安装
+## Install
 
 ```bash
-cd bilibili_summarizer_v3
+git clone https://github.com/supery0ung/Bilibili-AI-Summarizer.git
+cd Bilibili-AI-Summarizer
+
+python -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
 
-# 安装 ASR 和 LLM 模型
 ollama pull qwen3:8b
+playwright install chromium
 ```
 
-## 配置
+On macOS/Linux, activate the virtual environment with:
+
+```bash
+source venv/bin/activate
+```
+
+## Configure
+
+Copy the example config and fill in your own credentials:
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，填写：
-- Bilibili cookies（SESSDATA, bili_jct 等）
-- ASR 引擎选择（`qwen_asr` 或 `whisper`）
-- Ollama 模型配置
+Required Bilibili cookie fields:
 
-## 使用
+- `sessdata`
+- `bili_jct`
+- `dedeuserid`
+- `buvid3`
 
-```powershell
-# 一键运行全部流程 (A → G)
+You can find them in your browser after logging in to Bilibili:
+
+1. Open Bilibili in the browser and log in.
+2. Open developer tools.
+3. Inspect a request to `api.bilibili.com`.
+4. Copy the relevant cookie values into `config.yaml`.
+
+Do not commit `config.yaml`. It contains live credentials and is intentionally ignored by git.
+
+## Model And Cache Paths
+
+By default, the project uses a user cache directory for model and temporary files. You can override that with environment variables:
+
+```bash
+set BILIBILI_MODEL_CACHE=D:\ai_models
+set BILIBILI_TEMP=D:\temp\bilibili_summarizer
+```
+
+On macOS/Linux:
+
+```bash
+export BILIBILI_MODEL_CACHE=/data/ai_models
+export BILIBILI_TEMP=/data/tmp/bilibili_summarizer
+```
+
+Ollama model storage is controlled by Ollama itself.
+
+## Usage
+
+Run the full pipeline:
+
+```bash
 python main.py run --max-items 10
+```
 
-# 分步运行
-python main.py fetch                    # Step A: 获取 + 过滤
-python main.py download --max-items 5   # Step B: 下载音频
-python main.py transcribe --max-items 5 # Step C: 语音转文字
-python main.py correct --max-items 5    # Step D: 校正文本
-python main.py summarize --max-items 5  # Step E: 生成摘要
-python main.py epub                     # Step F: 生成 EPUB
-python main.py upload --max-items 5     # Step G: 上传微信读书
+Run individual steps:
 
-# 查看状态
-python main.py status
+```bash
+python main.py fetch
+python main.py download --max-items 5
+python main.py transcribe --max-items 5
+python main.py correct --max-items 5
+python main.py summarize --max-items 5
+python main.py epub
+python main.py upload --max-items 5
+```
 
-# 处理指定视频 (绕过稍后再看列表和过滤器)
+Process specific videos and bypass the Watch Later queue:
+
+```bash
 python main.py run --url https://www.bilibili.com/video/BV1xxxxxx
-python main.py run --url BV1xxxxxx BV1yyyyyy # 支持多个 BV 号
+python main.py run --url BV1xxxxxx BV1yyyyyy
 ```
 
-## 输出文件
+Check pipeline status:
 
-| 步骤 | 文件 | 说明 |
-|------|------|------|
-| Step C | `{标题}.md` | ASR 原始转录 |
-| Step D | `{标题}.corrected.md` | 校正后文本 |
-| Step E | `{标题}.final.md` | 摘要 + 校正文本 |
-| Step F | `{标题}.epub` | 电子书 |
-
-## 项目结构
-
-```
-bilibili_summarizer_v3/
-├── main.py                     # CLI 入口
-├── config.yaml                 # 配置文件（需自行创建）
-├── config.example.yaml         # 配置示例
-├── filters.yaml                # 视频过滤规则
-├── requirements.txt            # Python 依赖
-├── PIPELINE_FLOW.md            # 流程详细说明
-├── TESTING.md                  # 测试文档
-│
-├── clients/                    # 外部服务客户端
-│   ├── bilibili.py             # Bilibili API
-│   ├── downloader.py           # yt-dlp 音频下载
-│   ├── ollama_client.py        # Qwen3 LLM（校正+总结）
-│   ├── qwen_asr_client.py      # Qwen3-ASR 语音识别
-│   └── weread_browser.py       # 微信读书上传
-│
-├── core/                       # 核心流水线逻辑
-│   ├── pipeline.py             # 流水线编排
-│   ├── state.py                # 状态管理（pipeline_state.json）
-│   ├── models.py               # 数据模型（VideoInfo, VideoState, QueueItem）
-│   ├── filter.py               # 视频过滤器
-│   ├── base_step.py            # 步骤基类
-│   ├── step_downloader.py      # Step B: 下载
-│   ├── step_asr.py             # Step C: 转录
-│   └── step_llm.py             # Step D+E: 校正 + 总结
-│
-├── utils/                      # 工具函数
-│   ├── md_to_epub.py           # Markdown → EPUB 转换
-│   ├── logger.py               # 日志配置
-│   └── reset_state.py          # 状态重置工具
-│
-├── prompts/                    # LLM Prompt 模板
-│   ├── correct.txt             # 文本校正
-│   ├── summarize.txt           # 内容总结
-│   ├── filter.txt              # AI 智能过滤
-│   └── identify_speakers.txt   # 说话人识别
-│
-├── tests/                      # 回归测试（41 个测试）
-│   ├── conftest.py             # 共享 fixture
-│   ├── test_models.py          # 数据模型测试
-│   ├── test_state.py           # 状态管理测试
-│   ├── test_filter.py          # 过滤器测试
-│   ├── test_step_llm.py        # LLM 步骤测试
-│   ├── test_epub.py            # EPUB 生成测试
-│   ├── test_md_to_epub.py      # Markdown 转换测试
-│   └── test_build_final_md.py  # 最终文档结构测试
-│
-└── output/                     # 输出目录
-    ├── pipeline_state.json     # 流水线状态
-    ├── pipeline_queue.json     # 当前队列
-    ├── media/                  # 下载的音频
-    ├── transcripts/            # 转录文本 (.md)
-    └── epub/                   # 生成的电子书
+```bash
+python main.py status
 ```
 
-## 获取 Bilibili Cookies
+## Output
 
-1. 打开浏览器，登录 bilibili.com
-2. 按 F12 打开开发者工具 → Network 标签
-3. 刷新页面，找到 `api.bilibili.com` 请求
-4. 在 Request Headers → Cookie 中提取：`SESSDATA`、`bili_jct`、`DedeUserID`、`BUVID3`
+Generated files are written under `output/`:
 
-## 模型配置
+| Path | Description |
+| --- | --- |
+| `output/pipeline_state.json` | Resume-safe state for each video |
+| `output/pipeline_queue.json` | Current queue |
+| `output/media/` | Downloaded audio |
+| `output/transcripts/` | Raw, corrected, and final Markdown files |
+| `output/epub/` | Generated EPUB ebooks |
 
-| 模型 | 用途 | 配置位置 |
-|------|------|----------|
-| Qwen3-ASR | 语音识别 (1.7B SOTA) | `config.yaml` → `qwen3: model: "Qwen/Qwen3-ASR-1.7B"` |
-| Qwen 3.5 9B | 文本校正 + 总结 | Ollama: `qwen3.5:9b` |
+The final Markdown file contains:
 
-模型存储位置：
-- HuggingFace: set `BILIBILI_MODEL_CACHE` (default: user cache directory)
-- Ollama: configure with Ollama's own model storage settings
+- Core summary
+- Key points
+- Full corrected text
 
-## 测试
+Step F converts that final Markdown file into EPUB.
 
-```powershell
+## Tests
+
+The regression suite uses fixtures only. It does not require real Bilibili API calls, downloads, Ollama inference, or GPU work.
+
+```bash
 python -m pytest tests/ -v
 ```
 
-详细测试说明见 [TESTING.md](TESTING.md)。
+Run a single test file:
+
+```bash
+python -m pytest tests/test_epub.py -v
+```
+
+## Project Structure
+
+```text
+.
+├── main.py                  # CLI entry point
+├── config.example.yaml      # Safe example config
+├── filters.yaml             # Rule-based video filters
+├── clients/                 # Bilibili, downloader, ASR, Ollama, WeRead clients
+├── core/                    # Pipeline orchestration, state, and step classes
+├── prompts/                 # LLM prompt templates
+├── scripts/                 # Utility and scheduled-run scripts
+├── tests/                   # Regression tests
+├── utils/                   # EPUB, logging, state helpers
+└── output/                  # Runtime artifacts, ignored by git
+```
+
+## Notes
+
+- The pipeline is resume-safe through `output/pipeline_state.json`.
+- Prompt behavior can be changed by editing files in `prompts/`.
+- `config.yaml`, `output/`, and logs are ignored so private credentials and generated artifacts stay local.
